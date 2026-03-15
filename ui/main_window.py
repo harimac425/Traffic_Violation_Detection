@@ -47,7 +47,7 @@ from src.detector import Detector, Detection
 from src.violations import ViolationDetector, Violation
 from src.tracker import ConstraintAwareSORT
 from src.ocr import get_ocr_engine, PlateReadingAccumulator
-from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter, BoxSmoother
+from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter, BoxSmoother, get_lower_region
 from ui.llm_widgets import ModelSelector
 from ui.camera_manager import CameraManagerDialog, CameraEditDialog, CameraItemWidget
 
@@ -254,10 +254,13 @@ class DetectionThread(QThread):
                         plate_text = self.vehicle_plates.get(det.track_id)
                         
                         # If no plate cached, try to find one and OCR it
-                        if not plate_text:
+                        if not plate_text or self.plate_ghost_count[det.track_id] > 0:
+                            # Use Plausibility Filter: Plate must be in the lower half of vehicle
+                            lower_region = get_lower_region(det.box, ratio=0.6)
+                            
                             for plate in plate_dets:
-                                # Relaxed threshold for better association: 0.01 (1%) overlap
-                                if boxes_overlap(det.box, plate.box, threshold=0.01):
+                                # Strict association: Box must overlap with lower region
+                                if boxes_overlap(lower_region, plate.box, threshold=0.1):
                                     # Smooth the plate box for more stable cropping/drawing
                                     # Since plates aren't tracked, we associate smoother with vehicle ID
                                     smoother_key = f"P_{det.track_id}"
@@ -274,6 +277,12 @@ class DetectionThread(QThread):
                                         
                                         # Use consensus if available, fallback to single reading
                                         text = consensus_text or text
+                                        
+                                        # RELOCK LOGIC: If we find a higher confidence real detection, 
+                                        # update the tracking offset even if we had a ghost
+                                        is_new_best = False
+                                        if det.track_id not in self.plate_relative_offsets or conf > 0.6:
+                                            is_new_best = True
                                         
                                         # Fallback to LLM if standard OCR is weak and consensus isn't reached
                                         if (not text or len(text) < 5) and self.llm_provider:
@@ -300,18 +309,18 @@ class DetectionThread(QThread):
                                             plate_text = text
                                             self.vehicle_plates[det.track_id] = text
                                         
-                                        # --- NEW: RELATIVE POSITION LOCK ---
-                                        # Store where the plate is RELATIVE to the bike
-                                        v_w = det.box[2] - det.box[0]
-                                        v_h = det.box[3] - det.box[1]
-                                        if v_w > 0 and v_h > 0:
-                                            self.plate_relative_offsets[det.track_id] = [
-                                                (plate.box[0] - det.box[0]) / v_w,
-                                                (plate.box[1] - det.box[1]) / v_h,
-                                                (plate.box[2] - det.box[0]) / v_w,
-                                                (plate.box[3] - det.box[1]) / v_h
-                                            ]
-                                            self.plate_ghost_count[det.track_id] = 0 # Reset miss counter
+                                        # --- RE-LOCK RELATIVE POSITION ---
+                                        if is_new_best:
+                                            v_w = det.box[2] - det.box[0]
+                                            v_h = det.box[3] - det.box[1]
+                                            if v_w > 0 and v_h > 0:
+                                                self.plate_relative_offsets[det.track_id] = [
+                                                    (plate.box[0] - det.box[0]) / v_w,
+                                                    (plate.box[1] - det.box[1]) / v_h,
+                                                    (plate.box[2] - det.box[0]) / v_w,
+                                                    (plate.box[3] - det.box[1]) / v_h
+                                                ]
+                                                self.plate_ghost_count[det.track_id] = 0
                                         break
                                         
                         # --- NEW: GHOST TRACKING (If detector missed this frame) ---

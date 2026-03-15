@@ -120,6 +120,21 @@ def get_upper_region(box: List[float], ratio: float = 0.4) -> List[float]:
     return [box[0], box[1], box[2], box[1] + height * ratio]
 
 
+def get_lower_region(box: List[float], ratio: float = 0.5) -> List[float]:
+    """
+    Get the lower region of a bounding box (for license plate detection).
+    
+    Args:
+        box: Bounding box [x1, y1, x2, y2]
+        ratio: How much of the bottom to consider (0.5 = bottom 50%)
+    
+    Returns:
+        Lower region bounding box
+    """
+    height = box[3] - box[1]
+    return [box[0], box[3] - height * ratio, box[2], box[3]]
+
+
 def draw_detection(
     frame: np.ndarray,
     box: List[float],
