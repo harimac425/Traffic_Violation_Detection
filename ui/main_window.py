@@ -45,9 +45,9 @@ class PersistentMenu(QMenu):
 
 from src.detector import Detector, Detection
 from src.violations import ViolationDetector, Violation
-from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter
 from src.tracker import ConstraintAwareSORT
-from src.ocr import get_ocr_engine
+from src.ocr import get_ocr_engine, PlateReadingAccumulator
+from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter, BoxSmoother
 from ui.llm_widgets import ModelSelector
 from ui.camera_manager import CameraManagerDialog, CameraEditDialog, CameraItemWidget
 
@@ -82,6 +82,10 @@ class DetectionThread(QThread):
         self.paused = False
         self.seek_target = -1 # Frame to seek to
         self.llm_rate_limiter = RateLimiter(config.LLM_MAX_RPM)
+        
+        # Stability Components
+        self.plate_smoothers = defaultdict(BoxSmoother) # {track_id: BoxSmoother}
+        self.plate_accumulator = PlateReadingAccumulator()
         
         # Wiring Parameters from UI
         self.stop_line_y = config.STOP_LINE_Y
@@ -195,6 +199,8 @@ class DetectionThread(QThread):
                 self.llm_attempted_triples.clear()
                 self.llm_attempted_phones.clear()
                 self.llm_voting_buffer.clear() # Clear voting buffer too
+                self.plate_smoothers.clear()
+                self.plate_accumulator = PlateReadingAccumulator() # Reset accumulator
                 
                 # If paused, we still want to show the new frame
                 if self.paused:
@@ -248,31 +254,47 @@ class DetectionThread(QThread):
                             for plate in plate_dets:
                                 # Relaxed threshold for better association: 0.01 (1%) overlap
                                 if boxes_overlap(det.box, plate.box, threshold=0.01):
+                                    # Smooth the plate box for more stable cropping/drawing
+                                    # Since plates aren't tracked, we associate smoother with vehicle ID
+                                    smoother_key = f"P_{det.track_id}"
+                                    plate.box = self.plate_smoothers[smoother_key].update(plate.box)
+                                    
                                     # Try standard OCR first
                                     if self.plate_ocr:
                                         cropped = self.plate_ocr.crop_plate_from_frame(frame, plate.box)
                                         text, conf = self.plate_ocr.read_plate(cropped)
                                         
-                                        # Fallback to LLM if standard OCR is weak and we have a provider
-                                        if (not text or conf < 0.7) and self.llm_provider:
-                                            # Rate limit: Only try LLM once per track_id to save cost/latency
+                                        # Accumulate for consensus
+                                        self.plate_accumulator.add_reading(det.track_id, text, cropped)
+                                        consensus_text = self.plate_accumulator.get_consensus(det.track_id)
+                                        
+                                        # Use consensus if available, fallback to single reading
+                                        text = consensus_text or text
+                                        
+                                        # Fallback to LLM if standard OCR is weak and consensus isn't reached
+                                        if (not text or len(text) < 5) and self.llm_provider:
+                                            # ... rest of LLM logic stays same ...
                                             if det.track_id not in self.llm_attempted_plates:
-                                                # Use Rate Limiter before calling LLM
                                                 if self.llm_rate_limiter.can_request():
+                                                    # Use the BEST crop from accumulator for LLM call
+                                                    best_crops = self.plate_accumulator.best_crops.get(det.track_id, [])
+                                                    llm_crop = best_crops[0][1] if best_crops else cropped
+                                                    
                                                     logger.info(f"AI Action: Requesting LLM Plate Reading for ID {det.track_id}")
-                                                    llm_text, llm_conf = self.llm_provider.read_plate(cropped)
+                                                    llm_text, llm_conf = self.llm_provider.read_plate(llm_crop)
                                                     logger.info(f"AI Reaction: LLM read plate {det.track_id} as '{llm_text}'")
                                                     if llm_text:
                                                         text = llm_text
                                                         conf = llm_conf
                                                         self.llm_attempted_plates.add(det.track_id)
-                                                        det.llm_verified = True # Mark for cyan visual feedback
+                                                        det.llm_verified = True
+                                                        # Put LLM result back into accumulator
+                                                        self.plate_accumulator.confirmed_plates[det.track_id] = llm_text
                                         
-                                        # Lowered confidence threshold to 0.3
-                                        if text and conf > 0.3:
+                                        # Update cache
+                                        if text and (len(text) > 4 or conf > 0.8):
                                             plate_text = text
                                             self.vehicle_plates[det.track_id] = text
-                                            # print(f"OCR Success: ID {det.track_id} -> {text}")
                                         break
                         
                         # Deduplication Logic
@@ -679,6 +701,7 @@ class MainWindow(QMainWindow):
         
         self.model_selector = ModelSelector()
         self.model_selector.model_changed.connect(self.switch_brain)
+        self.model_selector.device_changed.connect(self.switch_device)
         header_row.addWidget(self.model_selector)
         content_area.addLayout(header_row)
         
@@ -1303,15 +1326,27 @@ class MainWindow(QMainWindow):
     def switch_brain(self, model_id):
         """Switch the AI model (Brain) used for LLM vision"""
         if self.detection_thread:
-            if model_id in ["cpu", "cuda"]:
+            if model_id == "local":
                 # Local only - disable LLM provider
                 self.detection_thread.llm_provider = None
-                print(f"Switched to Local Processing: {model_id}")
+                if config:
+                    config.LLM_PROVIDER = "local"
+                print(f"Switched to Local Processing Only")
             else:
                 # LLM based - re-init to pick up potential new keys
+                if config:
+                    config.LLM_PROVIDER = model_id
                 from src.llm import get_llm_provider
-                self.detection_thread.llm_provider = get_llm_provider(model=model_id)
+                self.detection_thread.llm_provider = get_llm_provider()
                 print(f"Switched Brain to: {model_id}")
+
+    def switch_device(self, device_key):
+        """Switch the hardware device (CPU/GPU) used for detection"""
+        if self.detection_thread:
+            # Re-initialize models on the new device
+            # This will also emit device_info which updates the status indicator
+            self.detection_thread.initialize_models(device_type=device_key)
+            print(f"Switched Vision Engine to: {device_key}")
     
     def update_device_status(self, device_name):
         """Update the device status label"""

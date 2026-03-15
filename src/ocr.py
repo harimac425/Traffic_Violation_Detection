@@ -529,6 +529,81 @@ class PaddleOCREngine:
         x2, y2 = min(w, x2 + padding), min(h, y2 + padding)
         return frame[y1:y2, x1:x2].copy()
 
+class PlateReadingAccumulator:
+    """
+    Accumulates multiple OCR readings for a vehicle to find the most accurate consensus.
+    Uses temporal voting and image clarity ranking (Laplacian variance).
+    """
+    def __init__(self, max_samples: int = 15, consensus_threshold: float = 0.6):
+        self.max_samples = max_samples
+        self.threshold = consensus_threshold
+        self.readings = {} # track_id -> List[str]
+        self.best_crops = {} # track_id -> List[Tuple[float, np.ndarray]] (clarity, crop)
+        self.confirmed_plates = {} # track_id -> str
+
+    def calculate_clarity(self, image: np.ndarray) -> float:
+        """Estimate image clarity using Laplacian variance (blur detection)"""
+        if image is None or image.size == 0: return 0
+        try:
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image
+            return cv2.Laplacian(gray, cv2.CV_64F).var()
+        except: return 0
+
+    def add_reading(self, track_id: int, plate_text: str, crop: np.ndarray):
+        """Add a candidate reading and crop for a specific track"""
+        if track_id is None: return
+        
+        # 1. Update text history if valid
+        if plate_text and len(plate_text) > 3:
+            if track_id not in self.readings: self.readings[track_id] = []
+            self.readings[track_id].append(plate_text)
+            if len(self.readings[track_id]) > self.max_samples: 
+                self.readings[track_id].pop(0)
+
+        # 2. Store high-resolution best crops
+        if crop is not None and crop.size > 0:
+            clarity = self.calculate_clarity(crop)
+            if track_id not in self.best_crops: self.best_crops[track_id] = []
+            
+            # Store with clarity score
+            self.best_crops[track_id].append((clarity, crop))
+            # Sort by clarity descending
+            self.best_crops[track_id].sort(key=lambda x: x[0], reverse=True)
+            # Keep top 10 best frames
+            self.best_crops[track_id] = self.best_crops[track_id][:10]
+
+    def get_consensus(self, track_id: int) -> Optional[str]:
+        """Determine the most likely plate text based on history"""
+        if track_id in self.confirmed_plates:
+            return self.confirmed_plates[track_id]
+            
+        history = self.readings.get(track_id, [])
+        if not history: return None
+        
+        # Simple majority vote
+        from collections import Counter
+        counts = Counter(history)
+        most_common, freq = counts.most_common(1)[0]
+        
+        # If we have a strong consensus or enough samples, lock it in
+        if (freq / len(history) >= self.threshold and len(history) >= 3) or len(history) >= 10:
+            # Prefer longer strings if they meet a minimum frequency
+            # (Fixes "09" vs "KL 09...")
+            long_candidates = [text for text, f in counts.items() if len(text) > 8 and f >= 2]
+            if long_candidates:
+                # Return the most frequent of the long ones
+                result = max(long_candidates, key=lambda x: counts[x])
+            else:
+                result = most_common
+                
+            self.confirmed_plates[track_id] = result
+            return result
+            
+        return most_common if len(history) > 5 else None
+
 def get_ocr_engine(engine: str = "easyocr", use_gpu: bool = True):
     """
     Factory function to get the configured OCR engine.

@@ -58,9 +58,16 @@ def export_project():
         (export_dir / d).mkdir(exist_ok=True)
         print(f"Initialized directory: {d}/")
 
+    # 5. Create ZIP Archive
+    zip_name = export_dir.name
+    zip_path = export_dir.parent / zip_name
+    print(f"\n[*] Creating ZIP archive: {zip_path}.zip")
+    shutil.make_archive(str(zip_path), 'zip', export_dir)
+
     print("\n" + "="*40)
     print("[SUCCESS] Professional TVDS Distribution Created!")
-    print(f"Location: {export_dir}")
+    print(f"Folder: {export_dir}")
+    print(f"Archive: {zip_path}.zip")
     print("="*40)
     
 if __name__ == "__main__":

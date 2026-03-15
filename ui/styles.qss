@@ -150,15 +150,15 @@ QPushButton:pressed {
 }
 
 /* Fix for Sidebar Menu Indicator (Dropdown Arrow) */
-#violationToggleBtn::menu-indicator {
-    subcontrol-origin: padding;
-    subcontrol-position: center right;
-    right: 8px; /* Moved left for better visibility */
-    width: 12px;
+#violationToggleBtn, #brainSelector {
+    padding-right: 32px; /* Adjusted padding */
 }
 
-#violationToggleBtn {
-    padding-right: 32px; /* Adjusted padding */
+#brainSelector::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 12px;
+    width: 10px;
 }
 
 /* Primary Actions */

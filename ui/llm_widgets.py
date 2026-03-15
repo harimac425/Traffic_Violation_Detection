@@ -306,71 +306,131 @@ class ApiKeyDialog(QDialog):
         self.accept()
 
 class ModelSelector(QWidget):
-    """Refined Tooltip-style selector for detection models"""
+    """Refined Tooltip-style selector prioritizing hardware compute with conditional LLM visibility"""
     model_changed = pyqtSignal(str)
+    device_changed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        self.btn = QPushButton("🧠 AI Brain: Gemini")
-        self.btn.setObjectName("controlBar")
+        self.btn = QPushButton("🧠 AI Brain: CPU")
+        self.btn.setObjectName("brainSelector")
         self.btn.setMinimumHeight(40)
-        self.btn.setStyleSheet("font-size: 11px; padding: 0 15px; border-radius: 20px;")
+        self.btn.setStyleSheet("font-size: 11px; padding: 0 35px 0 15px; border-radius: 20px;")
         
         self.menu = QMenu(self)
         self.menu.setObjectName("violationMenu")
-        
-        # Load available from config
-        self.brain_options = [
-            ("gemini", "Google Gemini (Pro)"),
-            ("openai", "OpenAI (GPT-4o)"),
-            ("custom", "Local / Custom API")
-        ]
-        
-        for key, label in self.brain_options:
-            action = QAction(label, self)
-            action.triggered.connect(lambda checked, k=key: self.set_model(k))
-            self.menu.addAction(action)
-            
-        self.menu.addSeparator()
-        setup_action = QAction("⚙️ Configure Brains...", self)
-        setup_action.triggered.connect(self.show_manager)
-        self.menu.addAction(setup_action)
-        
         self.btn.setMenu(self.menu)
         layout.addWidget(self.btn)
         
+        self.refresh_menu()
+        
         # Initial State
         if config:
-            self.current_model = config.LLM_PROVIDER
+            self.current_model = getattr(config, 'LLM_PROVIDER', 'local')
+            self.current_device = getattr(config, 'DEVICE_TYPE', 'auto')
             self.update_button_text()
+
+    def refresh_menu(self):
+        """Build/Rebuild menu based on available keys"""
+        self.menu.clear()
+        
+        # 1. Hardware Options (Always present)
+        cpu_action = QAction("💻 Local CPU", self)
+        cpu_action.triggered.connect(lambda: self.set_device_only("cpu"))
+        self.menu.addAction(cpu_action)
+        
+        gpu_action = QAction("🚀 NVIDIA GPU", self)
+        gpu_action.triggered.connect(lambda: self.set_device_only("cuda"))
+        self.menu.addAction(gpu_action)
+        
+        auto_action = QAction("🤖 Auto-Detect Device", self)
+        auto_action.triggered.connect(lambda: self.set_device_only("auto"))
+        self.menu.addAction(auto_action)
+        
+        self.menu.addSeparator()
+        
+        # 2. Configured AI Brains (Conditional)
+        has_ai = False
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, 'r') as f:
+                    data = json.load(f)
+                    
+                    if data.get("GEMINI_API_KEY"):
+                        action = QAction("🧠 Google Gemini (Pro)", self)
+                        action.triggered.connect(lambda: self.set_model("gemini"))
+                        self.menu.addAction(action)
+                        has_ai = True
+                        
+                    if data.get("OPENAI_API_KEY"):
+                        action = QAction("🧠 OpenAI (GPT-4o)", self)
+                        action.triggered.connect(lambda: self.set_model("openai"))
+                        self.menu.addAction(action)
+                        has_ai = True
+                        
+                    if data.get("CUSTOM_BASE_URL"):
+                        action = QAction(f"🧠 {data.get('CUSTOM_MODEL_NAME', 'Custom LLM')}", self)
+                        action.triggered.connect(lambda: self.set_model("custom"))
+                        self.menu.addAction(action)
+                        has_ai = True
+            except: pass
+            
+        if has_ai:
+            self.menu.addSeparator()
+            
+        # 3. Management
+        setup_action = QAction("⚙️ Add / Configure AI Brains...", self)
+        setup_action.triggered.connect(self.show_manager)
+        self.menu.addAction(setup_action)
+
+    def set_device_only(self, device_key):
+        """Set compute but turn off LLM (requested Local behavior)"""
+        self.current_model = "local"
+        if config:
+            config.LLM_PROVIDER = "local"
+            config.DEVICE_TYPE = device_key
+        
+        self.save_settings({"LLM_PROVIDER": "local", "DEVICE_TYPE": device_key})
+        self.device_changed.emit(device_key)
+        self.model_changed.emit("local")
+        self.update_button_text()
 
     def set_model(self, model_key):
         self.current_model = model_key
         if config:
             config.LLM_PROVIDER = model_key
         
-        # Save to settings.json
+        self.save_settings({"LLM_PROVIDER": model_key})
+        self.update_button_text()
+        self.model_changed.emit(model_key)
+
+    def save_settings(self, updates):
         try:
             data = {}
             if os.path.exists(SETTINGS_FILE):
                 with open(SETTINGS_FILE, 'r') as f:
                     data = json.load(f)
-            data["LLM_PROVIDER"] = model_key
+            data.update(updates)
             with open(SETTINGS_FILE, 'w') as f:
                 json.dump(data, f, indent=4)
         except: pass
 
-        self.update_button_text()
-        self.model_changed.emit(model_key)
-
     def update_button_text(self):
-        label = next((l for k, l in self.brain_options if k == self.current_model), "Gemini")
-        self.btn.setText(f"🧠 AI Brain: {label.split('(')[0].strip()}")
+        if self.current_model == "local" or self.current_model == "no_brain":
+            # Show Device
+            device_map = {"cpu": "CPU", "cuda": "GPU", "auto": "Auto"}
+            dev = getattr(config, 'DEVICE_TYPE', 'auto')
+            self.btn.setText(f"🧠 Brain: {device_map.get(dev, 'Local')}")
+        else:
+            # Show LLM
+            names = {"gemini": "Gemini", "openai": "GPT-4o", "custom": "Custom"}
+            self.btn.setText(f"🧠 Brain: {names.get(self.current_model, 'AI')}")
 
     def show_manager(self):
         diag = ApiKeyDialog(self.window())
-        diag.exec_()
+        if diag.exec_() == QDialog.Accepted:
+            self.refresh_menu()
         self.update_button_text()

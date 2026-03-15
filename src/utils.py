@@ -228,6 +228,28 @@ def non_max_suppression(boxes: np.ndarray, scores: np.ndarray, iou_threshold: fl
     return keep
 
 
+class MovingAverage:
+    """Simple Exponential Moving Average (EMA) for temporal smoothing"""
+    def __init__(self, alpha: float = 0.3):
+        self.alpha = alpha
+        self.value = None
+
+    def update(self, next_value: float) -> float:
+        if self.value is None:
+            self.value = next_value
+        else:
+            self.value = self.alpha * next_value + (1 - self.alpha) * self.value
+        return self.value
+
+class BoxSmoother:
+    """Smooths bounding boxes across frames using EMA to eliminate jitter"""
+    def __init__(self, alpha: float = 0.3):
+        self.smoothers = [MovingAverage(alpha) for _ in range(4)]
+
+    def update(self, box: List[float]) -> List[float]:
+        """Update and return the smoothed box [x1, y1, x2, y2]"""
+        return [self.smoothers[i].update(val) for i, val in enumerate(box)]
+
 class RateLimiter:
     """
     Simple rate limiter to manage API requests per minute (RPM).
