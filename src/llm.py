@@ -54,6 +54,11 @@ class LLMProvider(ABC):
         pass
         
     @abstractmethod
+    def verify_phone_usage_voting(self, frames: List[np.ndarray]) -> Tuple[bool, str]:
+        """Detect if the rider is using a phone using multiple frames. Returns (is_using_phone, reasoning)"""
+        pass
+        
+    @abstractmethod
     def test_connectivity(self) -> Tuple[bool, str]:
         """Test if the API key and connection are working"""
         pass
@@ -180,6 +185,19 @@ class GeminiProvider(LLMProvider):
         )
         response = self.analyze_frame(rider_crop, prompt).strip()
         
+        is_using = response.upper().startswith("YES")
+        return is_using, response
+
+    def verify_phone_usage_voting(self, frames: List[np.ndarray]) -> Tuple[bool, str]:
+        """Multi-frame voting for phone usage detection (Gemini)"""
+        prompt = (
+            "I'm showing you multiple snapshots of the same motorcycle rider. "
+            "Examine ALL of them carefully. Is the rider holding or using a mobile phone? "
+            "A phone might be clearly visible in one frame but obscured in another. "
+            "Return 'YES' or 'NO' followed by reasons from the best frame. "
+            "Example: 'YES - Visible in frame 2 held to left ear'."
+        )
+        response = self.analyze_frames(frames, prompt).strip()
         is_using = response.upper().startswith("YES")
         return is_using, response
 
@@ -310,6 +328,17 @@ class OpenAIProvider(LLMProvider):
             "Reply with YES or NO and a brief reason."
         )
         response = self.analyze_frame(rider_crop, prompt).strip()
+        is_using = response.upper().startswith("YES")
+        return is_using, response
+
+    def verify_phone_usage_voting(self, frames: List[np.ndarray]) -> Tuple[bool, str]:
+        """Multi-frame voting for OpenAI phone detection"""
+        prompt = (
+            "Examine these sequential frames of a motorcycle rider. "
+            "Is the rider holding or using a mobile phone while riding? "
+            "Return YES or NO and the reason."
+        )
+        response = self.analyze_frames(frames, prompt).strip()
         is_using = response.upper().startswith("YES")
         return is_using, response
 

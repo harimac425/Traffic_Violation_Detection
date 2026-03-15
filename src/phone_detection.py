@@ -179,33 +179,44 @@ class MediaPipePhoneDetector:
         """
         Check if a wrist-shoulder-ear arrangement indicates phone usage.
         
-        Relaxed criteria for better detection:
-        1. Wrist is near head/face region (horizontally)
-        2. Wrist is at or above shoulder level OR near face level
-        3. Landmarks have minimum visibility
+        Refined for REAL-WORLD CCTV:
+        1. Low visibility tolerance (CCTV crops are blurry).
+        2. Wide horizontal proximity (Hands can be slightly in front of head).
+        3. High vertical leeway (Phones aren't always held above shoulders).
         """
-        min_visibility = 0.25  # Lowered from 0.4 — CCTV crops have poor visibility
+        min_visibility = 0.15  # Extremely relaxed for CCTV/blur
         
-        # Check visibility
-        if (wrist.visibility < min_visibility or 
-            shoulder.visibility < min_visibility):
+        # Head reference point (Priority: Ear if visible, else Nose)
+        has_head = False
+        head_x, head_y = 0.5, 0.5 # Default center
+        
+        if nose.visibility > min_visibility:
+            head_x, head_y = nose.x, nose.y
+            has_head = True
+        elif ear.visibility > min_visibility:
+            head_x, head_y = ear.x, ear.y
+            has_head = True
+            
+        if not has_head or wrist.visibility < min_visibility:
             return False
         
-        # Head reference point
-        head_x = ear.x if ear.visibility > min_visibility else nose.x
-        head_y = ear.y if ear.visibility > min_visibility else nose.y
-        
         # Criterion 1: Wrist horizontally close to head
+        # In a side profile, the hand might be slightly horizontal to the nose/ear
         horizontal_distance = abs(wrist.x - head_x)
-        hand_near_head_x = horizontal_distance < 0.35  # Widened from 0.25
+        hand_near_head_x = horizontal_distance < 0.45  # Widened for side-views
         
-        # Criterion 2: Wrist near head level (relaxed — doesn't need to be above shoulder)
+        # Criterion 2: Wrist near head level (relaxed)
+        # Vertical distance from "top of head" (approx nose/ear)
         vertical_distance = abs(wrist.y - head_y)
-        hand_near_head_y = vertical_distance < 0.40  # Widened from 0.3
+        hand_near_head_y = vertical_distance < 0.50  # Very wide vertical window
         
-        # Criterion 3: Hand is at least somewhat raised (above hip level, i.e. above midpoint)
-        hand_raised = wrist.y < (shoulder.y + 0.15)  # Allow slightly below shoulder
-        
+        # Criterion 3: Hand is raised (Relative to shoulder if possible, else just "top half")
+        # Most riders hold phones near their face level, well above the bike handles.
+        if shoulder.visibility > min_visibility:
+            hand_raised = wrist.y < (shoulder.y + 0.2) # Allow hand slightly below shoulder
+        else:
+            hand_raised = wrist.y < head_y + 0.3 # Fallback: must be in head/upper chest region
+            
         return hand_near_head_x and hand_near_head_y and hand_raised
     
     def check_phone_violations(self, 

@@ -79,7 +79,8 @@ class DetectionThread(QThread):
         self.llm_attempted_helmets = set() # Track IDs where LLM was already used for helmets
         self.llm_attempted_triples = set() # Track IDs for triples
         self.llm_attempted_phones = set()  # Track IDs for phone check
-        self.llm_voting_buffer = defaultdict(list) # {track_id: [crops]}
+        self.llm_voting_buffer = defaultdict(list) # {track_id: [crops]} for triples
+        self.llm_voting_buffer_phones = defaultdict(list) # {track_id: [crops]} for phones
         self.cap: Optional[cv2.VideoCapture] = None
         self.running = False
         self.source = None
@@ -191,6 +192,7 @@ class DetectionThread(QThread):
         self.llm_attempted_triples.clear()
         self.llm_attempted_phones.clear()
         self.llm_voting_buffer.clear()
+        self.llm_voting_buffer_phones.clear()
         
         if self.tracker and hard:
             self.tracker = ConstraintAwareSORT(
@@ -531,28 +533,44 @@ class DetectionThread(QThread):
                                             # If LLM says < 3, remove any heuristic-based triple riding violation
                                             violations = [v for v in violations if not (v.track_id == det.track_id and v.type == "TRIPLE_RIDING")]
                                     
-                                    # --- PHONE USAGE CHECK (LLM Vision) ---
+                                    # --- PHONE USAGE CHECK (SMART VOTING) ---
                                     if needs_phone and config.ENABLED_VIOLATIONS.get("PHONE_USAGE", True):
-                                        self.llm_attempted_phones.add(det.track_id)
-                                        if self.llm_rate_limiter.can_request():
-                                            logger.info(f"AI Action: Checking Phone Usage for ID {det.track_id}")
-                                            is_using_phone, phone_reason = self.llm_provider.verify_phone_usage(crop)
-                                            logger.info(f"AI Reaction: LLM says ID {det.track_id} using phone: {is_using_phone} ({phone_reason})")
+                                        # Add to phone buffer
+                                        self.llm_voting_buffer_phones[det.track_id].append(crop)
+                                        
+                                        # Only call LLM once we have 3 crops (Voting)
+                                        if len(self.llm_voting_buffer_phones[det.track_id]) >= 3:
+                                            logger.info(f"AI Action: Starting Multi-Frame Phone Voting for ID {det.track_id}")
+                                            crops = self.llm_voting_buffer_phones[det.track_id]
+                                            is_using_phone, phone_reason = self.llm_provider.verify_phone_usage_voting(crops)
+                                            logger.info(f"AI Reaction: LLM Phone Voting for ID {det.track_id} resulted in: {is_using_phone} ({phone_reason})")
                                             
-                                            if is_using_phone:
-                                                # Add phone usage violation
-                                                if not any(v.track_id == det.track_id and v.type == "PHONE_USAGE" for v in violations):
-                                                    new_v = Violation(
-                                                        type="PHONE_USAGE",
-                                                        vehicle_box=det.box,
-                                                        track_id=det.track_id,
-                                                        confidence=0.95,
-                                                        timestamp=time.time(),
-                                                        details=f"AI VERIFIED: {phone_reason}"
-                                                    )
-                                                    new_v.llm_verified = True
-                                                    new_v.llm_reasoning = phone_reason
-                                                    violations.append(new_v)
+                                            if "Error:" in phone_reason:
+                                                print(f"CRITICAL: AI Brain Error in Phone Voting: {phone_reason}")
+                                            else:
+                                                self.llm_attempted_phones.add(det.track_id)
+                                                
+                                                if is_using_phone:
+                                                    # Add phone usage violation
+                                                    if not any(v.track_id == det.track_id and v.type == "PHONE_USAGE" for v in violations):
+                                                        new_v = Violation(
+                                                            type="PHONE_USAGE",
+                                                            vehicle_box=det.box,
+                                                            track_id=det.track_id,
+                                                            confidence=0.99,
+                                                            timestamp=time.time(),
+                                                            details=f"AI VOTED: {phone_reason}"
+                                                        )
+                                                        new_v.llm_verified = True
+                                                        new_v.llm_reasoning = phone_reason
+                                                        violations.append(new_v)
+                                                
+                                                # Clear buffer for this track
+                                                del self.llm_voting_buffer_phones[det.track_id]
+                                        else:
+                                            # If we don't have enough frames yet, ensure any pending heuristic-only violation is suppressed
+                                            # (Wait for LLM consensus)
+                                            violations = [v for v in violations if not (v.track_id == det.track_id and v.type == "PHONE_USAGE")]
                                 
                 
                 # Filter out LLM-overridden violations (internal utility type)
