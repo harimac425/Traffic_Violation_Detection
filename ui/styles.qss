@@ -1,0 +1,337 @@
+/* 
+   Traffic Violation Detection System - Android 16 (Material You) Theme
+   Aesthetics: Material Design 3, Dynamic Color, Extra Rounded pill shapes, Elevated Surfaces
+*/
+
+* {
+    font-family: 'Roboto', 'Google Sans', 'Inter', 'Segoe UI Variable Text', -apple-system, sans-serif;
+    outline: none;
+}
+
+QMainWindow, QDialog {
+    background-color: #1A1C1E; /* Material Dark Surface */
+}
+
+QWidget {
+    background-color: transparent;
+    color: #E2E2E6; /* Material On-Surface */
+}
+
+/* Headers */
+h2 {
+    color: #E2E2E6;
+    font-weight: 600;
+    font-size: 24px;
+    letter-spacing: -0.5px;
+}
+
+/* Scrollbars - Material MD3 Style */
+QScrollBar:vertical {
+    background-color: transparent;
+    width: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: #44474E; /* Material Outline Variant */
+    border-radius: 5px;
+    min-height: 48px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: #DDE2F1;
+}
+
+/* Card-like containers - Material MD3 Cards */
+QGroupBox, #statsPanel QFrame, #providerBox {
+    background-color: #2D2F33; /* Surface Container High */
+    border: 1px solid #44474F;
+    border-radius: 28px; /* Extra rounded as per Android 16 */
+    margin-top: 15px;
+    padding: 16px;
+}
+
+/* Specific styling for the AI Brain Manager Boxes */
+#providerBox {
+    background-color: #2D2F33;
+    border: 1px solid #384961;
+}
+
+#providerBox QLabel {
+    color: #E2E2E6;
+}
+
+QGroupBox::title {
+    color: #D0BCFF; /* Primary Tonal */
+    subcontrol-origin: margin;
+    left: 24px;
+    padding: 0 10px;
+}
+
+#sidePanel {
+    background-color: #1A1C1E;
+    border-right: 1px solid #44474E;
+}
+
+/* Sidebar Specific Buttons - Material Navigation */
+#sidePanel QPushButton {
+    background-color: transparent;
+    border: none;
+    text-align: left;
+    padding: 12px 24px; /* Reduced from 32px to prevent clipping */
+    height: 56px;
+    border-radius: 28px; /* Perfectly round pill */
+    color: #C4C6D0;
+    font-size: 14px;
+    font-weight: 600;
+    margin: 4px 8px;
+}
+
+#sidePanel QPushButton:hover {
+    background-color: #2D2F33;
+    color: #E2E2E6;
+}
+
+#sidePanel QPushButton:checked {
+    background-color: #DDE2F1; /* Primary Tonal Container */
+    color: #001A3F; /* On Primary Container */
+}
+
+/* Gallery/Camera Add Button - Higher specificity to override #sidePanel QPushButton */
+#sidePanel #galleryBrowseBtn {
+    background-color: #DDE2F1;
+    color: #001A3F;
+    border-radius: 12px;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 0;
+    height: 28px;
+    min-width: 28px;
+    text-align: center;
+}
+
+#sidePanel #galleryBrowseBtn:hover {
+    background-color: #BAC7E3;
+}
+
+/* Video Feed Area */
+#videoPanel {
+    background-color: #000000;
+    border-radius: 36px;
+    border: 1px solid #44474E;
+}
+
+/* Control Bar */
+#controlBar {
+    background-color: #2D2F33; /* Surface Container High */
+    border-radius: 32px;
+    padding: 8px 16px;
+}
+
+/* General Buttons - Material MD3 Style */
+QPushButton {
+    background-color: #333538; /* Surface Container High */
+    color: #E2E2E6;
+    border: none;
+    padding: 0 24px;
+    height: 48px;
+    border-radius: 24px; /* Perfect Pill */
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.1px;
+}
+
+QPushButton:hover {
+    background-color: #44474F;
+}
+
+QPushButton:pressed {
+    background-color: #5C5E66;
+}
+
+/* Fix for Sidebar Menu Indicator (Dropdown Arrow) */
+#violationToggleBtn::menu-indicator {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 8px; /* Moved left for better visibility */
+    width: 12px;
+}
+
+#violationToggleBtn {
+    padding-right: 32px; /* Adjusted padding */
+}
+
+/* Primary Actions */
+QPushButton#startBtn, QPushButton#openBtn, [objectName="startBtn"] {
+    background-color: #D0BCFF; /* Primary Tonal */
+    color: #381E72;
+}
+
+QPushButton#startBtn:hover, QPushButton#openBtn:hover {
+    background-color: #E8DFFF;
+}
+
+/* Error/Stop Actions */
+QPushButton#stopBtn, [objectName="stopBtn"] {
+    background-color: #FFB4AB; /* Error Container */
+    color: #690005;
+}
+
+/* KPI Cards */
+#kpiCard {
+    background-color: #2D2F33;
+    border-radius: 24px;
+    padding: 20px;
+    border: 1px solid #44474F;
+}
+
+QLabel#kpiValue {
+    font-size: 36px;
+    font-weight: 500;
+    color: #D0BCFF;
+}
+
+QLabel#kpiTitle {
+    color: #C4C6D0;
+    font-size: 11px;
+    text-transform: uppercase;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+/* Tables */
+QTableWidget {
+    background-color: #1A1C1E;
+    border: 1px solid #44474E;
+    gridline-color: #2D2F33;
+    border-radius: 20px;
+    color: #E2E2E6;
+}
+
+QHeaderView::section {
+    background-color: #2D2F33;
+    color: #C4C6D0;
+    padding: 16px;
+    border: none;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 11px;
+}
+
+QTableWidget::item {
+    padding: 16px;
+    border-bottom: 1px solid #2D2F33;
+}
+
+/* Inputs - MD3 Filled Style */
+QSpinBox, QComboBox, QLineEdit {
+    background-color: #2D2F33;
+    border-radius: 12px;
+    padding: 12px 16px;
+    color: #E2E2E6;
+    border: 1px solid #44474E;
+}
+
+QSpinBox:focus, QComboBox:focus, QLineEdit:focus {
+    border: 2px solid #D0BCFF;
+    background-color: #333538;
+}
+
+QLineEdit::placeholder {
+    color: #74777F;
+}
+
+/* Tabs */
+QTabWidget::pane {
+    border: none;
+    background-color: transparent;
+}
+
+QTabBar::tab {
+    background-color: transparent;
+    color: #C4C6D0;
+    padding: 12px 24px;
+    font-weight: 600;
+    min-width: 100px;
+}
+
+QTabBar::tab:selected {
+    color: #DDE2F1;
+    border-bottom: 3px solid #D0BCFF;
+}
+
+/* Lists/Gallery */
+QListWidget#galleryList {
+    background-color: transparent;
+    border: none;
+}
+
+QListWidget#galleryList::item {
+    background-color: #2D2F33;
+    border-radius: 24px;
+    padding: 12px;
+    margin: 8px;
+}
+
+QListWidget#galleryList::item:selected {
+    background-color: #DDE2F1;
+    color: #001A3F;
+}
+
+/* Web Cam List Item Styles */
+#cameraList {
+    background-color: transparent;
+    border: none;
+}
+
+#cameraItem {
+    background-color: #2D2F33;
+    border: 1px solid #44474E;
+    border-radius: 20px;
+    padding: 12px;
+    margin-bottom: 8px;
+}
+
+#cameraItem QLabel#camName {
+    color: #E2E2E6;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+#cameraItem QLabel {
+    color: #E2E2E6;
+}
+
+#cameraItem #camUrl {
+    color: #94A3B8;
+    font-size: 11px;
+    font-weight: normal;
+}
+
+#cameraItem QPushButton {
+    background-color: #383B3F;
+    color: #E2E2E6;
+    border-radius: 8px;
+    height: 32px;
+    width: 32px;
+    padding: 0;
+    font-size: 14px;
+    margin: 0;
+}
+
+#cameraItem QPushButton:hover {
+    background-color: #44474F;
+    color: #D0BCFF;
+}
+
+#cameraList::item:selected {
+    background-color: transparent;
+}
+
+/* Status Labels */
+#statusLabel {
+    font-size: 11px;
+    color: #94A3B8;
+    margin-top: 4px;
+    font-weight: 500;
+}

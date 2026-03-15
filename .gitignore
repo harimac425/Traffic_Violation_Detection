@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+venv/
+env/
+.env
+.venv/
+ENV/
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# Project-specific — do NOT commit large model files or sensitive data
+models/*.pt
+*.pt
+*.pth
+*.onnx
+
+# Database and evidence data (user-generated)
+violations.db
+evidence/
+logs/
+reports/
+
+# API keys / settings
+settings.json
+.env
+
+# Temp files
+*.tmp
+*.bak
+*.log
+C:/tmp/
+
+# Large media
+*.mp4
+*.avi
+*.mov
+*.mkv
