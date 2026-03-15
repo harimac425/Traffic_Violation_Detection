@@ -47,7 +47,7 @@ from src.detector import Detector, Detection
 from src.violations import ViolationDetector, Violation
 from src.tracker import ConstraintAwareSORT
 from src.ocr import get_ocr_engine, PlateReadingAccumulator
-from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter, BoxSmoother, get_lower_region
+from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter, BoxSmoother, get_lower_region, is_plausible_plate_geometry
 from ui.llm_widgets import ModelSelector
 from ui.camera_manager import CameraManagerDialog, CameraEditDialog, CameraItemWidget
 
@@ -258,9 +258,11 @@ class DetectionThread(QThread):
                             # Use Plausibility Filter: Plate must be in the lower half of vehicle
                             lower_region = get_lower_region(det.box, ratio=0.6)
                             
+                            # Strict association & Geometry Validation
                             for plate in plate_dets:
-                                # Strict association: Box must overlap with lower region
                                 if boxes_overlap(lower_region, plate.box, threshold=0.1):
+                                    if not is_plausible_plate_geometry(plate.box, det.box):
+                                        continue
                                     # Smooth the plate box for more stable cropping/drawing
                                     # Since plates aren't tracked, we associate smoother with vehicle ID
                                     smoother_key = f"P_{det.track_id}"
@@ -278,10 +280,18 @@ class DetectionThread(QThread):
                                         # Use consensus if available, fallback to single reading
                                         text = consensus_text or text
                                         
-                                        # RELOCK LOGIC: If we find a higher confidence real detection, 
-                                        # update the tracking offset even if we had a ghost
+                                        # RE-LOCK LOGIC: If a new detection looks more authoritative
+                                        # (Higher confidence or valid OCR result), override ghost.
                                         is_new_best = False
-                                        if det.track_id not in self.plate_relative_offsets or conf > 0.6:
+                                        is_valid_pattern = self.plate_ocr.validate_indian_plate(text) if text else False
+                                        
+                                        if det.track_id not in self.plate_relative_offsets:
+                                            is_new_best = True
+                                        elif is_valid_pattern and self.plate_ghost_count[det.track_id] > 0:
+                                            # Valid pattern overrides any ghost
+                                            is_new_best = True
+                                        elif conf > 0.7 and self.plate_ghost_count[det.track_id] > 5:
+                                            # Strong detection overrides stale ghost
                                             is_new_best = True
                                         
                                         # Fallback to LLM if standard OCR is weak and consensus isn't reached

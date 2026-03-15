@@ -135,6 +135,42 @@ def get_lower_region(box: List[float], ratio: float = 0.5) -> List[float]:
     return [box[0], box[3] - height * ratio, box[2], box[3]]
 
 
+def is_plausible_plate_geometry(plate_box: List[float], vehicle_box: List[float]) -> bool:
+    """
+    Check if a plate's geometry is plausible relative to its parent vehicle.
+    
+    Rules:
+    1. Aspect Ratio: Ideally between 2.0 and 5.0 (wide rectangle).
+    2. Vertical Position: Should be in the lower 70% of the vehicle.
+    3. Width: Should not be wider than the vehicle.
+    """
+    pw = plate_box[2] - plate_box[0]
+    ph = plate_box[3] - plate_box[1]
+    vw = vehicle_box[2] - vehicle_box[0]
+    vh = vehicle_box[3] - vehicle_box[1]
+    
+    if ph == 0 or vh == 0: return False
+    
+    aspect_ratio = pw / ph
+    # Indian plates are roughly 500x120mm (4.1:1) or 340x200mm (1.7:1)
+    if aspect_ratio < 1.6 or aspect_ratio > 6.0:
+        return False
+        
+    # Centroid height relative to vehicle top
+    pc_y = (plate_box[1] + plate_box[3]) / 2
+    relative_y = (pc_y - vehicle_box[1]) / vh
+    
+    # Must be in lower 70%
+    if relative_y < 0.3:
+        return False
+        
+    # Scale check: Plate shouldn't be tiny or massive relative to vehicle
+    if pw / vw > 0.8 or pw / vw < 0.05:
+        return False
+        
+    return True
+
+
 def draw_detection(
     frame: np.ndarray,
     box: List[float],
