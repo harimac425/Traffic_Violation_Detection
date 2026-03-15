@@ -90,28 +90,32 @@ class PlateOCR:
     
     def _preprocess_plate(self, image: np.ndarray) -> np.ndarray:
         """
-        Refined preprocessing for license plates.
+        Refined preprocessing for license plates with adaptive scaling.
         """
-        # Resize for consistent processing
+        if image is None or image.size == 0:
+            return image
+            
+        # 1. Adaptive Scaling: Ensure enough pixels for OCR
         height, width = image.shape[:2]
-        if width < 200:
-            scale = 200 / width
+        if width < 300: # Increased from 200 for better detail
+            scale = 300 / width
+            # Use INTER_CUBIC for sharper edges on upscaling
             image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        
-        # Convert to grayscale
+        elif width > 800: # Scale down if too large
+            scale = 800 / width
+            image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+        # 2. Convert to Gray and Enhance Contrast (Tuned CLAHE)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        # Contrast enhancement (CLAHE)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        contrast = clahe.apply(gray)
+        # Increase clipLimit for more aggressive edge definition
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
         
-        # Denoising
-        denoised = cv2.fastNlMeansDenoising(contrast, None, 10, 7, 21)
+        # 3. Subtle Denoising
+        denoised = cv2.fastNlMeansDenoising(enhanced, None, h=3, templateWindowSize=7, searchWindowSize=21)
         
-        # Thresholding - more balanced
-        _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        return thresh
+        return denoised
     
     def _clean_plate_text(self, text: str) -> str:
         """Clean and normalize plate text"""
@@ -516,39 +520,40 @@ class PaddleOCREngine:
         if len(corrected) >= 10: return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:]}"
         return corrected
         
-    def validate_indian_plate(self, text: str) -> bool:
-        """
-        Validate Indian plate format strictly. 
-        Pattern: [State code][District numbers][Series letters][Unique digits]
-        Format: AA 11 AA 1111
-        """
-        if not text: return False
-        t = text.replace(" ", "").upper()
-        # [State: 2 chars][Dist: 2 digits][Series: 1-2 chars][Num: 1-4 digits]
-        pattern = r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{1,4}$'
-        return bool(re.match(pattern, t))
+def validate_indian_plate(text: str) -> bool:
+    """
+    Validate Indian plate format strictly. 
+    Pattern: [State code][District numbers][Series letters][Unique digits]
+    Format: AA 11 AA 1111
+    """
+    if not text: return False
+    # Remove all non-alphanumeric for matching
+    t = re.sub(r'[^A-Z0-9]', '', text.upper())
+    # [State: 2 chars][Dist: 2 digits][Series: 1-2 chars][Num: 1-4 digits]
+    pattern = r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{1,4}$'
+    return bool(re.match(pattern, t))
 
-    def score_plate_match(self, text: str) -> int:
-        """
-        Score how well a string matches the standard Indian plate pattern.
-        Higher score = better match. 
-        - Perfect (AA 11 AA 1111): 100
-        - Good (AA 11 A 1111): 80
-        - Partial (missing some parts): 20-50
-        - Random garbage: 0
-        """
-        if not text: return 0
-        t = text.replace(" ", "").upper()
+def score_plate_match(text: str) -> int:
+    """
+    Score how well a string matches the standard Indian plate pattern.
+    Higher score = better match. 
+    """
+    if not text: return 0
+    t = re.sub(r'[^A-Z0-9]', '', text.upper())
+    
+    score = 0
+    # State: KL, KA, MH...
+    if re.match(r'^[A-Z]{2}', t): score += 20         
+    # District: 01, 12...
+    if re.match(r'^[A-Z]{2}[0-9]{2}', t): score += 20   
+    # Series: A, AQ, B...
+    if re.match(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}', t): score += 30 
+    # Full Number: 3439...
+    if re.match(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{1,4}$', t): 
+        score += 30 
+        if len(t) >= 9: score += 10 # Ideal length
         
-        score = 0
-        if re.match(r'^[A-Z]{2}', t): score += 20         # State
-        if re.match(r'^[A-Z]{2}[0-9]{2}', t): score += 20   # Dist
-        if re.match(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}', t): score += 30 # Series
-        if re.match(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{1,4}$', t): 
-            score += 30 # Full Number
-            if len(t) >= 9: score += 10 # Ideal length
-            
-        return score
+    return score
 
 class PlateReadingAccumulator:
     """
@@ -563,12 +568,30 @@ class PlateReadingAccumulator:
         self.confirmed_plates = {} # track_id -> str
         self.pattern_scores = {} # track_id -> int (highest score seen)
 
-    def reset(self):
-        """Clear all accumulated state for a fresh session"""
-        self.readings.clear()
-        self.best_crops.clear()
-        self.confirmed_plates.clear()
-        self.pattern_scores.clear()
+    def reset(self, hard: bool = True):
+        """
+        Clear accumulated state. 
+        If hard=False, retain confirmed Indian plates and their scores.
+        """
+        if hard:
+            self.readings.clear()
+            self.best_crops.clear()
+            self.confirmed_plates.clear()
+            self.pattern_scores.clear()
+        else:
+            # Selective clearing: only keep confirmed valid patterns
+            # This allows IDs starting back at 1 after a loop to inherit their plate
+            to_keep_plates = {}
+            to_keep_scores = {}
+            for tid, plate in self.confirmed_plates.items():
+                if validate_indian_plate(plate):
+                    to_keep_plates[tid] = plate
+                    to_keep_scores[tid] = self.pattern_scores.get(tid, 100)
+            
+            self.readings.clear()
+            self.best_crops.clear()
+            self.confirmed_plates = to_keep_plates
+            self.pattern_scores = to_keep_scores
 
     def calculate_clarity(self, image: np.ndarray) -> float:
         """Estimate image clarity using Laplacian variance (blur detection)"""
@@ -578,7 +601,7 @@ class PlateReadingAccumulator:
             return cv2.Laplacian(gray, cv2.CV_64F).var()
         except: return 0
 
-    def add_reading(self, track_id: int, plate_text: str, crop: np.ndarray, ocr_engine=None):
+    def add_reading(self, track_id: int, plate_text: str, crop: np.ndarray, **kwargs):
         """Add a candidate reading and crop for a specific track"""
         if track_id is None: return
         
@@ -590,14 +613,13 @@ class PlateReadingAccumulator:
                 self.readings[track_id].pop(0)
 
             # 2. Pattern Scoring & Locking
-            if ocr_engine:
-                score = ocr_engine.score_plate_match(plate_text)
-                current_best = self.pattern_scores.get(track_id, 0)
-                if score >= 90: # Near-perfect pattern
-                    self.confirmed_plates[track_id] = plate_text
-                    self.pattern_scores[track_id] = 100
-                elif score > current_best:
-                    self.pattern_scores[track_id] = score
+            score = score_plate_match(plate_text)
+            current_best = self.pattern_scores.get(track_id, 0)
+            if score >= 90: # Near-perfect pattern
+                self.confirmed_plates[track_id] = plate_text
+                self.pattern_scores[track_id] = 100
+            elif score > current_best:
+                self.pattern_scores[track_id] = score
 
         # 3. Store high-resolution best crops
         if crop is not None and crop.size > 0:
@@ -607,7 +629,7 @@ class PlateReadingAccumulator:
             self.best_crops[track_id].sort(key=lambda x: x[0], reverse=True)
             self.best_crops[track_id] = self.best_crops[track_id][:10]
 
-    def get_consensus(self, track_id: int, ocr_engine=None) -> Optional[str]:
+    def get_consensus(self, track_id: int, **kwargs) -> Optional[str]:
         """
         Determine candidate plate(s) based on history and pattern match.
         Returns comma-separated candidates, prioritizing the best pattern match.
@@ -624,16 +646,12 @@ class PlateReadingAccumulator:
         
         # 2. Get high-scoring pattern matches
         scored_candidates = []
-        if ocr_engine:
-            for text in counts.keys():
-                score = ocr_engine.score_plate_match(text)
-                scored_candidates.append((text, score, counts[text]))
-            
-            # Sort by: Pattern Score (Primary), Frequency (Secondary), Length (Tertiary)
-            scored_candidates.sort(key=lambda x: (x[1], x[2], len(x[0])), reverse=True)
-        else:
-            scored_candidates = [(t, 0, c) for t, c in counts.items()]
-            scored_candidates.sort(key=lambda x: (x[2], len(x[0])), reverse=True)
+        for text in counts.keys():
+            score = score_plate_match(text)
+            scored_candidates.append((text, score, counts[text]))
+        
+        # Sort by: Pattern Score (Primary), Frequency (Secondary), Length (Tertiary)
+        scored_candidates.sort(key=lambda x: (x[1], x[2], len(x[0])), reverse=True)
 
         # 3. If we have a clear pattern match, return it
         best_text, best_score, _ = scored_candidates[0]

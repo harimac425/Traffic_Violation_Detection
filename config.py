@@ -148,7 +148,7 @@ PHONE_NEAR_PERSON_MARGIN = 50  # Pixels to check around person for phone object
 
 # Tracker Settings
 USE_CUSTOM_TRACKER = True      # Use ConstraintAwareSORT
-TRACKER_MAX_AGE = 50           # Increased for better persistence behind obstacles
+TRACKER_MAX_AGE = 30           # Reduced from 50 to minimize box ghosting after objects leave frame
 TRACKER_MIN_HITS = 2           # Faster track initialization
 TRACKER_IOU_THRESHOLD = 0.25   # Slightly more relaxed to handle fast motion
 TRACKER_STOP_LINE_GATING = True

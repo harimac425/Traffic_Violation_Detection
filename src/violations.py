@@ -21,7 +21,8 @@ from src.utils import (
     calculate_speed,
     calculate_direction,
     boxes_overlap,
-    calculate_containment
+    calculate_containment,
+    is_person_on_motorcycle
 )
 from src.signal_detection import RedSignalViolationDetector
 from src.phone_detection import MediaPipePhoneDetector
@@ -110,6 +111,15 @@ class ViolationDetector:
             threshold=getattr(config, 'TCB_THRESHOLD', 0.65)
         )
 
+    def reset(self):
+        """Reset internal state for a fresh session"""
+        self.track_history.clear()
+        self.vehicle_state.clear()
+        self.violation_cooldown.clear()
+        self.violation_persistence.clear()
+        # Reset TCB history
+        self.tcb.history.clear()
+
     
     def update_track_history(self, detections: List[Detection]):
         """Update position history for tracked objects"""
@@ -170,23 +180,7 @@ class ViolationDetector:
             # --- ROBUST RIDER ASSOCIATION ---
             riders = []
             for person in persons:
-                # 1. Box Overlap
-                overlap = boxes_overlap(person.box, motorcycle.box, threshold=0.1)
-                
-                # 2. Vertical Proximity & Containment
-                # Rider's feet (y2) should be within the top 30% or inside the bike's vertical span
-                p_y2 = person.box[3]
-                m_y1, m_y2 = motorcycle.box[1], motorcycle.box[3]
-                m_h = m_y2 - m_y1
-                
-                is_vertically_aligned = (m_y1 - m_h * 0.2) <= p_y2 <= (m_y1 + m_h * 0.5)
-                
-                # 3. Horizontal alignment (center alignment)
-                px_mid = (person.box[0] + person.box[2]) / 2
-                mx_mid = (motorcycle.box[0] + motorcycle.box[2]) / 2
-                is_horizontally_aligned = abs(px_mid - mx_mid) < (motorcycle.box[2] - motorcycle.box[0]) * 0.6
-                
-                if overlap or (is_vertically_aligned and is_horizontally_aligned):
+                if is_person_on_motorcycle(person.box, motorcycle.box):
                     riders.append(person)
             
             # Check each rider for helmet
@@ -236,21 +230,7 @@ class ViolationDetector:
             # --- PERSON-CENTRIC ASSOCIATION ---
             riders = []
             for person in persons:
-                # 1. Primary: Box Overlap (Rider is sitting on the bike)
-                overlap = boxes_overlap(person.box, motorcycle.box, threshold=0.1)
-                
-                # 2. Secondary: Proximity (Rider's feet are near the bike's upper frame)
-                # This catches people whose boxes might not perfectly overlap due to pose
-                px_mid = (person.box[0] + person.box[2]) / 2
-                mx_mid = (motorcycle.box[0] + motorcycle.box[2]) / 2
-                dist_x = abs(px_mid - mx_mid)
-                dist_y = abs(person.box[3] - motorcycle.box[1]) # feet distance from bike top
-                
-                # Proximity rules:
-                is_near = dist_x < (motorcycle.box[2] - motorcycle.box[0]) * 0.5 and \
-                          dist_y < (motorcycle.box[3] - motorcycle.box[1]) * 0.3
-                
-                if overlap or is_near:
+                if is_person_on_motorcycle(person.box, motorcycle.box):
                     riders.append(person)
             
             rider_count = len(riders)

@@ -47,7 +47,15 @@ from src.detector import Detector, Detection
 from src.violations import ViolationDetector, Violation
 from src.tracker import ConstraintAwareSORT
 from src.ocr import get_ocr_engine, PlateReadingAccumulator
-from src.utils import draw_detection, draw_violation_alert, boxes_overlap, RateLimiter, BoxSmoother, get_lower_region
+from src.utils import (
+    draw_detection, 
+    draw_violation_alert, 
+    boxes_overlap, 
+    RateLimiter, 
+    BoxSmoother, 
+    get_lower_region,
+    is_person_on_motorcycle
+)
 from ui.llm_widgets import ModelSelector
 from ui.camera_manager import CameraManagerDialog, CameraEditDialog, CameraItemWidget
 
@@ -157,14 +165,25 @@ class DetectionThread(QThread):
         """Set video source (file path or camera index)"""
         self.source = source
 
-    def clear_caches(self):
-        """Reset all temporal caches and accumulators for a fresh session"""
-        self.vehicle_plates.clear()
-        self.plate_smoothers.clear()
-        if hasattr(self.plate_accumulator, 'reset'):
-            self.plate_accumulator.reset()
+    def clear_caches(self, hard: bool = True):
+        """Reset all temporal caches and accumulators. If hard=False, persist plates."""
+        if hard:
+            self.vehicle_plates.clear()
         else:
-            self.plate_accumulator = PlateReadingAccumulator()
+            # Persist plates that match the Indian pattern
+            from src.ocr import validate_indian_plate
+            to_keep = {tid: p for tid, p in self.vehicle_plates.items() if validate_indian_plate(p)}
+            self.vehicle_plates = to_keep
+
+        self.plate_smoothers.clear()
+        
+        # Reset stateful modules
+        if hasattr(self.plate_accumulator, 'reset'):
+            self.plate_accumulator.reset(hard=hard)
+        
+        if hasattr(self.violation_detector, 'reset') and hard:
+            self.violation_detector.reset()
+
         self.plate_relative_offsets.clear()
         self.plate_ghost_count.clear()
         self.llm_attempted_plates.clear()
@@ -172,13 +191,14 @@ class DetectionThread(QThread):
         self.llm_attempted_triples.clear()
         self.llm_attempted_phones.clear()
         self.llm_voting_buffer.clear()
-        if self.tracker:
+        
+        if self.tracker and hard:
             self.tracker = ConstraintAwareSORT(
                 max_age=config.TRACKER_MAX_AGE,
                 min_hits=config.TRACKER_MIN_HITS,
                 iou_threshold=config.TRACKER_IOU_THRESHOLD
             )
-        logger.info("Session Reset: All caches cleared.")
+        logger.info(f"Session Reset ({'HARD' if hard else 'SOFT'}): Caches cleared.")
 
     def run(self):
         """Main detection loop"""
@@ -211,7 +231,7 @@ class DetectionThread(QThread):
             if self.seek_target >= 0:
                 # Clear tracking cache for large seeks
                 if abs(self.cap.get(cv2.CAP_PROP_POS_FRAMES) - self.seek_target) > 50:
-                    self.clear_caches()
+                    self.clear_caches(hard=True)
 
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.seek_target)
                 self.seek_target = -1
@@ -237,9 +257,9 @@ class DetectionThread(QThread):
             if not ret:
                 # Loop video file
                 if isinstance(self.source, str):
-                    logger.info("Video Looping: Resetting Session...")
+                    logger.info("Video Looping: Resetting Session (Persisting Plates)...")
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.clear_caches()
+                    self.clear_caches(hard=False)
                     continue
                 else:
                     break
@@ -283,9 +303,9 @@ class DetectionThread(QThread):
                                         cropped = self.plate_ocr.crop_plate_from_frame(frame, plate.box)
                                         text, conf = self.plate_ocr.read_plate(cropped)
                                         
-                                        # Accumulate for consensus with Pattern Ranking
-                                        self.plate_accumulator.add_reading(det.track_id, text, cropped, ocr_engine=self.plate_ocr)
-                                        consensus_text = self.plate_accumulator.get_consensus(det.track_id, ocr_engine=self.plate_ocr)
+                                        # Accumulate for consensus (now pattern-aware via module constants)
+                                        self.plate_accumulator.add_reading(det.track_id, text, cropped)
+                                        consensus_text = self.plate_accumulator.get_consensus(det.track_id)
                                         
                                         # Use consensus if available (now pattern-aware), fallback to single reading
                                         text = consensus_text or text
@@ -339,19 +359,13 @@ class DetectionThread(QThread):
                         if not any(boxes_overlap(det.box, p.box, threshold=0.01) for p in plate_dets):
                             if det.track_id in self.plate_relative_offsets:
                                 self.plate_ghost_count[det.track_id] += 1
-                                if self.plate_ghost_count[det.track_id] < 15: # Persistence window
+                                if self.plate_ghost_count[det.track_id] < 3: # Reduced persistence window
                                     # Recalculate plate box from vehicle position
                                     v_box = det.box
                                     v_w = v_box[2] - v_box[0]
                                     v_h = v_box[3] - v_box[1]
                                     rel = self.plate_relative_offsets[det.track_id]
                                     
-                                    ghost_box = [
-                                        v_box[0] + rel[0] * v_w,
-                                        v_box[1] + rel[1] * v_h,
-                                        v_box[2] + (rel[2] - 1) * v_w + (v_box[2] - v_box[0]) * (1-rel[2]), # Simplified
-                                        v_box[3] + (rel[3] - 1) * v_h + (v_box[3] - v_box[1]) * (1-rel[3])
-                                    ]
                                     # More robust calculation
                                     ghost_box = [
                                         v_box[0] + rel[0] * v_w,
@@ -376,11 +390,26 @@ class DetectionThread(QThread):
                         if plate_text and any(v.get("plate") == plate_text for v in vehicle_info):
                             continue
                         
+                        # Format candidate list for the UI (Patterns from Accumulator)
+                        consensus = self.plate_accumulator.get_consensus(det.track_id)
+                        raw_readings = self.plate_accumulator.readings.get(det.track_id, [])
+                        
+                        if consensus:
+                            # Primary display is the consensus/best pattern
+                            display_plate = consensus
+                            
+                            # Add secondary candidates if they exist and are different from consensus
+                            others = [r for r in set(raw_readings) if r != consensus]
+                            if others:
+                                display_plate += f" ({', '.join(others[:2])})"
+                        else:
+                            display_plate = ", ".join(list(set(raw_readings))[:3]) if raw_readings else "No Plate detected"
+
                         # Add to info list
                         vehicle_info.append({
                             "id": det.track_id,
                             "type": det.class_name,
-                            "plate": plate_text or "No Plate detected",
+                            "plate": display_plate,
                             "violation": ""  # Placeholder
                         })
 
@@ -391,8 +420,7 @@ class DetectionThread(QThread):
                         rider_count = 0
                         for person in main_dets:
                             if person.class_name == "person":
-                                # Relaxed threshold 0.1 for association
-                                if boxes_overlap(person.box, det.box, threshold=0.1):
+                                if is_person_on_motorcycle(person.box, det.box):
                                     rider_count += 1
                         
                         # Store count as attribute, DO NOT modify class_name yet

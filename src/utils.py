@@ -105,6 +105,35 @@ def boxes_overlap(box1: List[float], box2: List[float], threshold: float = 0.3) 
     return calculate_iou(box1, box2) > threshold
 
 
+def is_person_on_motorcycle(person_box: List[float], motorcycle_box: List[float]) -> bool:
+    """
+    Robust proximity heuristic to associate riders/passengers with a motorcycle.
+    Uses IoU, horizontal alignment, and vertical adjacency.
+    """
+    # 1. Base case: IoU (Simple overlap)
+    iou = calculate_iou(person_box, motorcycle_box)
+    if iou > 0.05: return True
+    
+    # 2. Geometry: Is the person sitting on/above the motorcycle?
+    px_mid = (person_box[0] + person_box[2]) / 2
+    mx_mid = (motorcycle_box[0] + motorcycle_box[2]) / 2
+    mw = motorcycle_box[2] - motorcycle_box[0]
+    mh = motorcycle_box[3] - motorcycle_box[1]
+    
+    # Horizontal alignment (Person should be roughly centered over bike)
+    h_dist = abs(px_mid - mx_mid)
+    is_h_aligned = h_dist < (mw * 0.4) # Within 40% of bike width from center
+    
+    # Vertical adjacency (Person's bottom should be near bike's top)
+    py2 = person_box[3]
+    my1 = motorcycle_box[1]
+    v_dist = abs(py2 - my1)
+    is_v_aligned = v_dist < (mh * 0.3) # Within 30% of bike height from top
+    
+    # Combined heuristic: High alignment even with zero IoU (common for passengers)
+    return is_h_aligned and is_v_aligned
+
+
 def get_upper_region(box: List[float], ratio: float = 0.4) -> List[float]:
     """
     Get the upper region of a bounding box (for head/helmet detection).
