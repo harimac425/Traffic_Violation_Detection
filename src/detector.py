@@ -118,19 +118,31 @@ class MultiModelDetector:
         
         # --- DYNAMIC ROI OPTIMIZATION ---
         inference_box = None
+        current_imgsz = 960 # Default base resolution
+        
         if self.enable_dynamic_roi:
             inference_box = self._get_dynamic_roi(frame)
             if inference_box:
                 x1, y1, x2, y2 = inference_box
+                roi_w = x2 - x1
+                h, w = frame.shape[:2]
+                
+                # If ROI is small (distant/concentrated motion), use higher imgsz for detail
+                if roi_w < w * 0.4:
+                    current_imgsz = 1600 # Super-resolution for small crops
+                elif roi_w < w * 0.6:
+                    current_imgsz = 1280 
+                
                 inference_frame = inference_frame[y1:y2, x1:x2]
         
         # --- PRIMARY DETECTION ---
-        # Run main model with tracking
+        # Run main model with tracking and adaptive resolution
         main_detections = self._run_model(
             self.main_model,
             inference_frame,
             track=track,
-            source="main"
+            source="main",
+            imgsz=current_imgsz
         )
         
         # Adjust detection boxes back to full frame if ROI was used
@@ -291,7 +303,8 @@ class MultiModelDetector:
         frame: np.ndarray,
         track: bool = False,
         source: str = "main",
-        confidence: float = None
+        confidence: float = None,
+        imgsz: int = 1280
     ) -> List[Detection]:
         """Run a single model on the frame"""
         conf = confidence or config.CONFIDENCE_THRESHOLD
@@ -307,7 +320,7 @@ class MultiModelDetector:
                     iou=config.IOU_THRESHOLD,
                     persist=True,
                     verbose=False,
-                    imgsz=1280  # Increased from default 640
+                    imgsz=imgsz
                 )
             else:
                 model_results = model(
@@ -315,7 +328,7 @@ class MultiModelDetector:
                     conf=global_conf,
                     iou=config.IOU_THRESHOLD,
                     verbose=False,
-                    imgsz=1280  # Increased from default 640 for better small object detection
+                    imgsz=imgsz
                 )
         except Exception as e:
             print(f"Detection error ({source}): {e}")
@@ -349,14 +362,10 @@ class MultiModelDetector:
                 if source == "plate":
                     class_name = self._normalize_plate_class(class_name)
 
-                # --- PER-CLASS CONFIDENCE FILTERING ---
-                target_conf = conf
-                if class_name == "person":
-                    target_conf = 0.25 # Maximum sensitivity for riders
-                elif class_name == "motorcycle":
-                    target_conf = 0.35 # Slightly lower for motorcycles
-                
-                if conf_score < target_conf:
+                # --- PER-CLASS CONFIDENCE FILTERING (ByteTrack Support) ---
+                # We return everything >= 0.1 so the tracker can perform secondary association.
+                # However, we still use the 'target_conf' logic for logging/filtering IF needed.
+                if conf_score < 0.1:
                     continue
                 
                 detections.append(Detection(

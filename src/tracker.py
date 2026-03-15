@@ -248,7 +248,7 @@ class ConstraintAwareSORT:
     
     def update(self, detections: List[Dict]) -> List[TrackState]:
         """
-        Update tracker with new detections for one frame.
+        Update tracker with new detections for one frame using ByteTrack-style association.
         
         Args:
             detections: List of dicts with keys:
@@ -260,6 +260,12 @@ class ConstraintAwareSORT:
             List of TrackState for all confirmed tracks
         """
         self.frame_count += 1
+        
+        # --- PREPARATION ---
+        # Split detections based on confidence (ByteTrack: low-conf detections still useful for matching)
+        det_thresh = getattr(config, 'TRACKER_DET_THRESH', 0.5)
+        detections_high = [d for d in detections if d.get('confidence', 0.0) >= det_thresh]
+        detections_low = [d for d in detections if 0.1 <= d.get('confidence', 0.0) < det_thresh]
         
         # Step 1: Predict new locations for existing tracks
         predicted_boxes = []
@@ -275,27 +281,59 @@ class ConstraintAwareSORT:
             self.trackers.pop(i)
             predicted_boxes.pop(i)
         
-        # Step 2: Build cost matrix and run Hungarian assignment
-        if len(detections) > 0 and len(self.trackers) > 0:
-            cost_matrix = self._build_cost_matrix(detections, predicted_boxes)
-            matched, unmatched_dets, unmatched_trks = self._associate(
-                cost_matrix, detections, len(self.trackers)
+        # Tracks currently available for matching
+        tracks_available = list(self.trackers)
+        track_boxes_available = list(predicted_boxes)
+        
+        # --- ASSOCIATION 1: HIGH DETECTIONS + ALL TRACKS ---
+        if len(detections_high) > 0 and len(tracks_available) > 0:
+            cost_matrix_1 = self._build_cost_matrix(detections_high, track_boxes_available)
+            matched_1, unmatched_dets_high, unmatched_trks_indices_1 = self._associate(
+                cost_matrix_1, detections_high, len(tracks_available)
             )
         else:
-            matched = []
-            unmatched_dets = list(range(len(detections)))
-            unmatched_trks = list(range(len(self.trackers)))
-        
-        # Step 3: Update matched tracks
-        for det_idx, trk_idx in matched:
-            det = detections[det_idx]
-            self.trackers[trk_idx].update(
+            matched_1 = []
+            unmatched_dets_high = list(range(len(detections_high)))
+            unmatched_trks_indices_1 = list(range(len(tracks_available)))
+            
+        # Update matched tracks
+        matched_track_ids = set()
+        for d_idx, t_idx in matched_1:
+            det = detections_high[d_idx]
+            tracks_available[t_idx].update(
                 det['bbox'], det.get('class_name', ''), det.get('confidence', 0.0)
             )
+            matched_track_ids.add(id(tracks_available[t_idx]))
+            
+        # --- ASSOCIATION 2: LOW DETECTIONS + REMAINING TRACKS ---
+        # Remaining tracks are those not matched in the first round
+        remaining_tracks = [t for t in tracks_available if id(t) not in matched_track_ids]
+        remaining_track_boxes = [predicted_boxes[self.trackers.index(t)] for t in remaining_tracks]
         
-        # Step 4: Create new tracks for unmatched detections
-        for det_idx in unmatched_dets:
-            det = detections[det_idx]
+        if len(detections_low) > 0 and len(remaining_tracks) > 0:
+            # For low-conf, we use simple IoU without class/direction penalties
+            # because low detections are often noisy or misclassified.
+            cost_matrix_2 = np.zeros((len(detections_low), len(remaining_tracks)))
+            for d in range(len(detections_low)):
+                for t in range(len(remaining_tracks)):
+                    iou = self._calculate_iou(detections_low[d]['bbox'], remaining_track_boxes[t])
+                    cost_matrix_2[d, t] = 1.0 - iou
+            
+            # Use simple association for the second round
+            matched_2, unmatched_dets_low, unmatched_trks_2 = self._associate_simple(
+                cost_matrix_2, detections_low, len(remaining_tracks)
+            )
+            
+            for d_idx, t_idx in matched_2:
+                det = detections_low[d_idx]
+                remaining_tracks[t_idx].update(
+                    det['bbox'], det.get('class_name', ''), det.get('confidence', 0.0)
+                )
+        
+        # --- NEW TRACK CREATION ---
+        # Only create new tracks from unmatched HIGH confidence detections
+        for d_idx in unmatched_dets_high:
+            det = detections_high[d_idx]
             new_tracker = KalmanBoxTracker(
                 det['bbox'], det.get('class_name', ''), det.get('confidence', 0.0)
             )
@@ -307,21 +345,42 @@ class ConstraintAwareSORT:
             if t.time_since_update <= self.max_age
         ]
         
-        # Step 6: Check stop-line crossing
+        # Step 6: Check stop-line crossing (same as original)
         if self.stop_line_y is not None:
             for tracker in self.trackers:
                 state = tracker.get_state()
-                bbox_bottom = state.bbox[3]  # y2
+                bbox_bottom = state.bbox[3]
                 if bbox_bottom >= self.stop_line_y and not tracker.crossed_stop_line:
                     tracker.crossed_stop_line = True
         
-        # Step 7: Return confirmed tracks (enough hits)
+        # Step 7: Return confirmed tracks
         results = []
         for tracker in self.trackers:
             if tracker.hit_streak >= self.min_hits or self.frame_count <= self.min_hits:
                 results.append(tracker.get_state())
         
         return results
+
+    def _associate_simple(self, cost_matrix: np.ndarray, detections: List[Dict],
+                        num_trackers: int) -> Tuple[List, List, List]:
+        """Helper for second-round association based on simple IoU"""
+        if cost_matrix.size == 0:
+            return [], list(range(len(detections))), list(range(num_trackers))
+        
+        row_indices, col_indices = linear_sum_assignment(cost_matrix)
+        matched = []
+        unmatched_dets = list(range(len(detections)))
+        unmatched_trks = list(range(num_trackers))
+        
+        for r, c in zip(row_indices, col_indices):
+            # For second-round (low conf), be stricter with IoU (req 0.5+)
+            if cost_matrix[r, c] > 0.5:
+                continue
+            matched.append((r, c))
+            if r in unmatched_dets: unmatched_dets.remove(r)
+            if c in unmatched_trks: unmatched_trks.remove(c)
+        
+        return matched, unmatched_dets, unmatched_trks
     
     def _build_cost_matrix(self, detections: List[Dict], 
                            predicted_boxes: List[List[float]]) -> np.ndarray:

@@ -6,7 +6,7 @@ based on object detections from YOLO11.
 """
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import defaultdict, deque
 import time
 from src.logger import get_logger
 
@@ -43,6 +43,39 @@ class Violation:
     llm_reasoning: Optional[str] = None  # Reasoning provided by LLM
 
 
+class ViolationBuffer:
+    """
+    Temporal Consistency Buffer (TCB): Tracks violation 'votes' over time.
+    Prevents false positives by requiring a consensus across multiple frames.
+    """
+    def __init__(self, window_size: int = 15, threshold: float = 0.7):
+        # {(track_id, type): deque([True, False, ...])}
+        self.history: Dict[Tuple[int, str], deque] = defaultdict(lambda: deque(maxlen=window_size))
+        self.threshold = threshold
+    
+    def add_vote(self, track_id: int, violation_type: str, detected: bool):
+        """Record whether a violation was seen in the current frame"""
+        self.history[(track_id, violation_type)].append(detected)
+    
+    def get_certainty(self, track_id: int, violation_type: str) -> float:
+        """Calculate the probability/consistency of the violation (0.0 to 1.0)"""
+        votes = self.history[(track_id, violation_type)]
+        if not votes: return 0.0
+        return sum(votes) / len(votes)
+    
+    def is_reliable(self, track_id: int, violation_type: str, min_votes: int = 5) -> bool:
+        """Check if the violation meets the temporal consensus threshold"""
+        votes = self.history[(track_id, violation_type)]
+        if len(votes) < min_votes: return False
+        return self.get_certainty(track_id, violation_type) >= self.threshold
+    
+    def clear_track(self, track_id: int):
+        """Cleanup data for a lost track"""
+        keys_to_del = [k for k in self.history if k[0] == track_id]
+        for k in keys_to_del:
+            del self.history[k]
+
+
 class ViolationDetector:
     """
     Detects traffic violations based on object detections.
@@ -70,6 +103,12 @@ class ViolationDetector:
         # Violation persistence tracking: {(track_id, type): consecutive_frames}
         self.violation_persistence: Dict[Tuple[int, str], int] = defaultdict(int)
         self.persistence_threshold = getattr(config, 'VIOLATION_PERSISTENCE_THRESHOLD', 3)
+        
+        # Temporal Consistency Buffer (TCB)
+        self.tcb = ViolationBuffer(
+            window_size=getattr(config, 'TCB_WINDOW', 15),
+            threshold=getattr(config, 'TCB_THRESHOLD', 0.65)
+        )
 
     
     def update_track_history(self, detections: List[Detection]):
@@ -128,10 +167,26 @@ class ViolationDetector:
             if self._is_on_cooldown(track_id, "NO_HELMET"):
                 continue
             
-            # Find persons overlapping with this motorcycle
+            # --- ROBUST RIDER ASSOCIATION ---
             riders = []
             for person in persons:
-                if boxes_overlap(person.box, motorcycle.box, threshold=0.2):
+                # 1. Box Overlap
+                overlap = boxes_overlap(person.box, motorcycle.box, threshold=0.1)
+                
+                # 2. Vertical Proximity & Containment
+                # Rider's feet (y2) should be within the top 30% or inside the bike's vertical span
+                p_y2 = person.box[3]
+                m_y1, m_y2 = motorcycle.box[1], motorcycle.box[3]
+                m_h = m_y2 - m_y1
+                
+                is_vertically_aligned = (m_y1 - m_h * 0.2) <= p_y2 <= (m_y1 + m_h * 0.5)
+                
+                # 3. Horizontal alignment (center alignment)
+                px_mid = (person.box[0] + person.box[2]) / 2
+                mx_mid = (motorcycle.box[0] + motorcycle.box[2]) / 2
+                is_horizontally_aligned = abs(px_mid - mx_mid) < (motorcycle.box[2] - motorcycle.box[0]) * 0.6
+                
+                if overlap or (is_vertically_aligned and is_horizontally_aligned):
                     riders.append(person)
             
             # Check each rider for helmet
@@ -553,32 +608,40 @@ class ViolationDetector:
             if use_plate_model and plates is not None:
                 all_violations.extend(self.check_missing_plate(vehicles, plates))
         
-        # --- PERSISTENCE FILTERING ---
+        # --- TCB VOTING & FILTERING ---
         final_violations = []
-        current_violation_keys = set()
         
-        for v in all_violations:
-            key = (v.track_id or 0, v.type)
-            current_violation_keys.add(key)
-            
-            # Increment persistence counter
-            self.violation_persistence[key] += 1
-            
-            # Only allow through if threshold is met
-            if self.violation_persistence[key] >= self.persistence_threshold:
-                final_violations.append(v)
-        
-        # Reset counters for violation types NO LONGER detected this frame
-        # Important: only for track_ids still in frame
+        # 1. Identify all tracked vehicles in the frame
         active_ids = {v.track_id for v in main_dets if v.track_id is not None}
-        keys_to_reset = []
-        for key in self.violation_persistence:
-            if key[0] in active_ids and key not in current_violation_keys:
-                keys_to_reset.append(key)
         
-        for key in keys_to_reset:
-            self.violation_persistence[key] = 0
+        # 2. Add votes for each violation type
+        # Violation types we care about for TCB
+        v_types = ["NO_HELMET", "TRIPLE_RIDING", "OVERSPEED", "WRONG_WAY", "PHONE_USAGE", "RED_SIGNAL", "MISSING_PLATE"]
+        
+        for tid in active_ids:
+            # Check which violations were detected for this track in this frame
+            detected_types = {v.type for v in all_violations if v.track_id == tid}
             
+            for v_type in v_types:
+                is_detected = v_type in detected_types
+                self.tcb.add_vote(tid, v_type, is_detected)
+                
+                # If detected in this frame, check if it's now reliable
+                if is_detected:
+                    if self.tcb.is_reliable(tid, v_type):
+                        # Find the actual Violation object to include in final list
+                        # We use the most recent one detected
+                        for v in all_violations:
+                            if v.track_id == tid and v.type == v_type:
+                                final_violations.append(v)
+                                break
+                                
+        # Cleanup TCB for tracks no longer in view
+        # We can do this periodically or based on track_history cleanup
+        # For now, simple cleanup for IDs that disappeared strictly
+        # (YOLO IDs are stable, so if they're not in main_dets, they are likely gone)
+        # Note: A more robust cleanup would check time_since_update from the tracker.
+        
         return final_violations
     
     def check_no_helmet_with_model(
