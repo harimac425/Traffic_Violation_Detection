@@ -517,22 +517,43 @@ class PaddleOCREngine:
         return corrected
         
     def validate_indian_plate(self, text: str) -> bool:
+        """
+        Validate Indian plate format strictly. 
+        Pattern: [State code][District numbers][Series letters][Unique digits]
+        Format: AA 11 AA 1111
+        """
         if not text: return False
-        text = text.replace(" ", "")
-        patterns = [r'^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$', r'^[A-Z]{2}\d{2}[A-Z]{1,3}\d{1,4}$']
-        return any(re.match(p, text) for p in patterns)
+        t = text.replace(" ", "").upper()
+        # [State: 2 chars][Dist: 2 digits][Series: 1-2 chars][Num: 1-4 digits]
+        pattern = r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{1,4}$'
+        return bool(re.match(pattern, t))
+
+    def score_plate_match(self, text: str) -> int:
+        """
+        Score how well a string matches the standard Indian plate pattern.
+        Higher score = better match. 
+        - Perfect (AA 11 AA 1111): 100
+        - Good (AA 11 A 1111): 80
+        - Partial (missing some parts): 20-50
+        - Random garbage: 0
+        """
+        if not text: return 0
+        t = text.replace(" ", "").upper()
         
-    def crop_plate_from_frame(self, frame: np.ndarray, box: Tuple[float, float, float, float], padding: int = 15) -> np.ndarray:
-        x1, y1, x2, y2 = map(int, box)
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
-        x2, y2 = min(w, x2 + padding), min(h, y2 + padding)
-        return frame[y1:y2, x1:x2].copy()
+        score = 0
+        if re.match(r'^[A-Z]{2}', t): score += 20         # State
+        if re.match(r'^[A-Z]{2}[0-9]{2}', t): score += 20   # Dist
+        if re.match(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}', t): score += 30 # Series
+        if re.match(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{1,4}$', t): 
+            score += 30 # Full Number
+            if len(t) >= 9: score += 10 # Ideal length
+            
+        return score
 
 class PlateReadingAccumulator:
     """
     Accumulates multiple OCR readings for a vehicle to find the most accurate consensus.
-    Uses temporal voting and image clarity ranking (Laplacian variance).
+    Uses temporal voting, pattern-priority matching, and clarity ranking.
     """
     def __init__(self, max_samples: int = 15, consensus_threshold: float = 0.6):
         self.max_samples = max_samples
@@ -540,19 +561,24 @@ class PlateReadingAccumulator:
         self.readings = {} # track_id -> List[str]
         self.best_crops = {} # track_id -> List[Tuple[float, np.ndarray]] (clarity, crop)
         self.confirmed_plates = {} # track_id -> str
+        self.pattern_scores = {} # track_id -> int (highest score seen)
+
+    def reset(self):
+        """Clear all accumulated state for a fresh session"""
+        self.readings.clear()
+        self.best_crops.clear()
+        self.confirmed_plates.clear()
+        self.pattern_scores.clear()
 
     def calculate_clarity(self, image: np.ndarray) -> float:
         """Estimate image clarity using Laplacian variance (blur detection)"""
         if image is None or image.size == 0: return 0
         try:
-            if len(image.shape) == 3:
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
             return cv2.Laplacian(gray, cv2.CV_64F).var()
         except: return 0
 
-    def add_reading(self, track_id: int, plate_text: str, crop: np.ndarray):
+    def add_reading(self, track_id: int, plate_text: str, crop: np.ndarray, ocr_engine=None):
         """Add a candidate reading and crop for a specific track"""
         if track_id is None: return
         
@@ -563,46 +589,63 @@ class PlateReadingAccumulator:
             if len(self.readings[track_id]) > self.max_samples: 
                 self.readings[track_id].pop(0)
 
-        # 2. Store high-resolution best crops
+            # 2. Pattern Scoring & Locking
+            if ocr_engine:
+                score = ocr_engine.score_plate_match(plate_text)
+                current_best = self.pattern_scores.get(track_id, 0)
+                if score >= 90: # Near-perfect pattern
+                    self.confirmed_plates[track_id] = plate_text
+                    self.pattern_scores[track_id] = 100
+                elif score > current_best:
+                    self.pattern_scores[track_id] = score
+
+        # 3. Store high-resolution best crops
         if crop is not None and crop.size > 0:
             clarity = self.calculate_clarity(crop)
             if track_id not in self.best_crops: self.best_crops[track_id] = []
-            
-            # Store with clarity score
             self.best_crops[track_id].append((clarity, crop))
-            # Sort by clarity descending
             self.best_crops[track_id].sort(key=lambda x: x[0], reverse=True)
-            # Keep top 10 best frames
             self.best_crops[track_id] = self.best_crops[track_id][:10]
 
-    def get_consensus(self, track_id: int) -> Optional[str]:
-        """Determine the most likely plate text based on history"""
+    def get_consensus(self, track_id: int, ocr_engine=None) -> Optional[str]:
+        """
+        Determine candidate plate(s) based on history and pattern match.
+        Returns comma-separated candidates, prioritizing the best pattern match.
+        """
         if track_id in self.confirmed_plates:
             return self.confirmed_plates[track_id]
             
         history = self.readings.get(track_id, [])
         if not history: return None
         
-        # Simple majority vote
+        # 1. Group candidates and apply pattern scores
         from collections import Counter
         counts = Counter(history)
-        most_common, freq = counts.most_common(1)[0]
         
-        # If we have a strong consensus or enough samples, lock it in
-        if (freq / len(history) >= self.threshold and len(history) >= 3) or len(history) >= 10:
-            # Prefer longer strings if they meet a minimum frequency
-            # (Fixes "09" vs "KL 09...")
-            long_candidates = [text for text, f in counts.items() if len(text) > 8 and f >= 2]
-            if long_candidates:
-                # Return the most frequent of the long ones
-                result = max(long_candidates, key=lambda x: counts[x])
-            else:
-                result = most_common
-                
-            self.confirmed_plates[track_id] = result
-            return result
+        # 2. Get high-scoring pattern matches
+        scored_candidates = []
+        if ocr_engine:
+            for text in counts.keys():
+                score = ocr_engine.score_plate_match(text)
+                scored_candidates.append((text, score, counts[text]))
             
-        return most_common if len(history) > 5 else None
+            # Sort by: Pattern Score (Primary), Frequency (Secondary), Length (Tertiary)
+            scored_candidates.sort(key=lambda x: (x[1], x[2], len(x[0])), reverse=True)
+        else:
+            scored_candidates = [(t, 0, c) for t, c in counts.items()]
+            scored_candidates.sort(key=lambda x: (x[2], len(x[0])), reverse=True)
+
+        # 3. If we have a clear pattern match, return it
+        best_text, best_score, _ = scored_candidates[0]
+        if best_score >= 80:
+            # Optionally "lock" it if it has been seen multiple times
+            if counts[best_text] >= 2:
+                self.confirmed_plates[track_id] = best_text
+            return best_text
+
+        # 4. Otherwise return top 2-3 candidates separated by comma
+        top_candidates = [t for t, s, c in scored_candidates[:3]]
+        return ", ".join(top_candidates)
 
 def get_ocr_engine(engine: str = "easyocr", use_gpu: bool = True):
     """
