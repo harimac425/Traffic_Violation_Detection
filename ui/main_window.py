@@ -86,6 +86,8 @@ class DetectionThread(QThread):
         # Stability Components
         self.plate_smoothers = defaultdict(BoxSmoother) # {track_id: BoxSmoother}
         self.plate_accumulator = PlateReadingAccumulator()
+        self.plate_relative_offsets = {} # {track_id: [rel_x1, rel_y1, rel_x2, rel_y2]}
+        self.plate_ghost_count = defaultdict(int) # {track_id: frames_since_det}
         
         # Wiring Parameters from UI
         self.stop_line_y = config.STOP_LINE_Y
@@ -201,6 +203,8 @@ class DetectionThread(QThread):
                 self.llm_voting_buffer.clear() # Clear voting buffer too
                 self.plate_smoothers.clear()
                 self.plate_accumulator = PlateReadingAccumulator() # Reset accumulator
+                self.plate_relative_offsets.clear()
+                self.plate_ghost_count.clear()
                 
                 # If paused, we still want to show the new frame
                 if self.paused:
@@ -295,7 +299,56 @@ class DetectionThread(QThread):
                                         if text and (len(text) > 4 or conf > 0.8):
                                             plate_text = text
                                             self.vehicle_plates[det.track_id] = text
+                                        
+                                        # --- NEW: RELATIVE POSITION LOCK ---
+                                        # Store where the plate is RELATIVE to the bike
+                                        v_w = det.box[2] - det.box[0]
+                                        v_h = det.box[3] - det.box[1]
+                                        if v_w > 0 and v_h > 0:
+                                            self.plate_relative_offsets[det.track_id] = [
+                                                (plate.box[0] - det.box[0]) / v_w,
+                                                (plate.box[1] - det.box[1]) / v_h,
+                                                (plate.box[2] - det.box[0]) / v_w,
+                                                (plate.box[3] - det.box[1]) / v_h
+                                            ]
+                                            self.plate_ghost_count[det.track_id] = 0 # Reset miss counter
                                         break
+                                        
+                        # --- NEW: GHOST TRACKING (If detector missed this frame) ---
+                        if not any(boxes_overlap(det.box, p.box, threshold=0.01) for p in plate_dets):
+                            if det.track_id in self.plate_relative_offsets:
+                                self.plate_ghost_count[det.track_id] += 1
+                                if self.plate_ghost_count[det.track_id] < 15: # Persistence window
+                                    # Recalculate plate box from vehicle position
+                                    v_box = det.box
+                                    v_w = v_box[2] - v_box[0]
+                                    v_h = v_box[3] - v_box[1]
+                                    rel = self.plate_relative_offsets[det.track_id]
+                                    
+                                    ghost_box = [
+                                        v_box[0] + rel[0] * v_w,
+                                        v_box[1] + rel[1] * v_h,
+                                        v_box[2] + (rel[2] - 1) * v_w + (v_box[2] - v_box[0]) * (1-rel[2]), # Simplified
+                                        v_box[3] + (rel[3] - 1) * v_h + (v_box[3] - v_box[1]) * (1-rel[3])
+                                    ]
+                                    # More robust calculation
+                                    ghost_box = [
+                                        v_box[0] + rel[0] * v_w,
+                                        v_box[1] + rel[1] * v_h,
+                                        v_box[0] + rel[2] * v_w,
+                                        v_box[1] + rel[3] * v_h
+                                    ]
+                                    
+                                    # Create a virtual plate detection for the UI
+                                    ghost_det = Detection(
+                                        box=ghost_box,
+                                        class_id=-1,
+                                        class_name="plate",
+                                        confidence=0.5,
+                                        track_id=None,
+                                        source_model="ghost_tracker"
+                                    )
+                                    detections.setdefault("plates", []).append(ghost_det)
                         
                         # Deduplication Logic
                         # Do not add to info list if this plate was already seen on another vehicle this frame
