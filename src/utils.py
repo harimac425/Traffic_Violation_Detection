@@ -140,9 +140,9 @@ def is_plausible_plate_geometry(plate_box: List[float], vehicle_box: List[float]
     Check if a plate's geometry is plausible relative to its parent vehicle.
     
     Rules:
-    1. Aspect Ratio: Ideally between 2.0 and 5.0 (wide rectangle).
-    2. Vertical Position: Should be in the lower 70% of the vehicle.
-    3. Width: Should not be wider than the vehicle.
+    1. Aspect Ratio: Primarily between 2.0 and 5.0 (wide rectangle).
+    2. Vertical Position: Should be in the lower 70% of the vehicle (Terminal Depth).
+    3. Scale: Plate area should be less than 5% of vehicle area.
     """
     pw = plate_box[2] - plate_box[0]
     ph = plate_box[3] - plate_box[1]
@@ -152,20 +152,23 @@ def is_plausible_plate_geometry(plate_box: List[float], vehicle_box: List[float]
     if ph == 0 or vh == 0: return False
     
     aspect_ratio = pw / ph
-    # Indian plates are roughly 500x120mm (4.1:1) or 340x200mm (1.7:1)
-    if aspect_ratio < 1.6 or aspect_ratio > 6.0:
+    # Standard Indian plates are ~4:1 (HSRP) or ~1.7:1 (Square). 
+    # Headlights are often 1:1 or 1.2:1. We set limit at 2.0 for HSRP dominance.
+    if aspect_ratio < 2.0 or aspect_ratio > 6.0:
         return False
         
     # Centroid height relative to vehicle top
     pc_y = (plate_box[1] + plate_box[3]) / 2
     relative_y = (pc_y - vehicle_box[1]) / vh
     
-    # Must be in lower 70%
+    # Must be in lower 70% (terminal depth)
     if relative_y < 0.3:
         return False
         
-    # Scale check: Plate shouldn't be tiny or massive relative to vehicle
-    if pw / vw > 0.8 or pw / vw < 0.05:
+    # Area check: Plate shouldn't be massive relative to vehicle (common in fake headlight detections)
+    plate_area = pw * ph
+    vehicle_area = vw * vh
+    if plate_area / vehicle_area > 0.04: # Max 4% of vehicle area
         return False
         
     return True

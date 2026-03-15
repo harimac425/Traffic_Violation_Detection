@@ -253,87 +253,118 @@ class DetectionThread(QThread):
                         # Check for associated plate
                         plate_text = self.vehicle_plates.get(det.track_id)
                         
-                        # If no plate cached, try to find one and OCR it
+                        # --- NEW: COMPETITIVE SELECTION & VLM GATEKEEPER ---
                         if not plate_text or self.plate_ghost_count[det.track_id] > 0:
-                            # Use Plausibility Filter: Plate must be in the lower half of vehicle
                             lower_region = get_lower_region(det.box, ratio=0.6)
+                            best_plate = None
+                            best_plate_score = -1.0
                             
-                            # Strict association & Geometry Validation
                             for plate in plate_dets:
                                 if boxes_overlap(lower_region, plate.box, threshold=0.1):
                                     if not is_plausible_plate_geometry(plate.box, det.box):
                                         continue
-                                    # Smooth the plate box for more stable cropping/drawing
-                                    # Since plates aren't tracked, we associate smoother with vehicle ID
-                                    smoother_key = f"P_{det.track_id}"
-                                    plate.box = self.plate_smoothers[smoother_key].update(plate.box)
                                     
-                                    # Try standard OCR first
-                                    if self.plate_ocr:
-                                        cropped = self.plate_ocr.crop_plate_from_frame(frame, plate.box)
-                                        text, conf = self.plate_ocr.read_plate(cropped)
-                                        
-                                        # Accumulate for consensus
-                                        self.plate_accumulator.add_reading(det.track_id, text, cropped)
-                                        consensus_text = self.plate_accumulator.get_consensus(det.track_id)
-                                        
-                                        # Use consensus if available, fallback to single reading
-                                        text = consensus_text or text
-                                        
-                                        # RE-LOCK LOGIC: If a new detection looks more authoritative
-                                        # (Higher confidence or valid OCR result), override ghost.
-                                        is_new_best = False
-                                        is_valid_pattern = self.plate_ocr.validate_indian_plate(text) if text else False
-                                        
-                                        if det.track_id not in self.plate_relative_offsets:
+                                    # Calculate a "Plate Likelihood" score
+                                    # Higher score = Lower in frame (y2) + higher confidence
+                                    pw = plate.box[2] - plate.box[0]
+                                    ph = plate.box[3] - plate.box[1]
+                                    aspect_ratio = pw / ph if ph > 0 else 0
+                                    
+                                    # Normalize y2 position (0 to 1 relative to vehicle height)
+                                    pc_y2 = (plate.box[3] - det.box[1]) / (det.box[3] - det.box[1])
+                                    
+                                    score = (plate.confidence * 0.4) + (pc_y2 * 0.6)
+                                    if score > best_plate_score:
+                                        best_plate_score = score
+                                        best_plate = plate
+
+                            if best_plate:
+                                plate = best_plate
+                                # Smooth the plate box
+                                smoother_key = f"P_{det.track_id}"
+                                plate.box = self.plate_smoothers[smoother_key].update(plate.box)
+                                    
+                                # Try standard OCR first
+                                if self.plate_ocr:
+                                    cropped = self.plate_ocr.crop_plate_from_frame(frame, plate.box)
+                                    text, conf = self.plate_ocr.read_plate(cropped)
+                                    
+                                    # Accumulate for consensus
+                                    self.plate_accumulator.add_reading(det.track_id, text, cropped)
+                                    consensus_text = self.plate_accumulator.get_consensus(det.track_id)
+                                    
+                                    # Use consensus if available, fallback to single reading
+                                    text = consensus_text or text
+                                    
+                                    # VLM-GATEKEEPER: Only allow "Locking" if identity is verified
+                                    is_verified_identity = False
+                                    if det.track_id in self.plate_accumulator.confirmed_plates or self.plate_accumulator.get_readings_count(det.track_id) > 10:
+                                        is_verified_identity = True
+                                    
+                                    # RE-LOCK LOGIC: If a new detection looks more authoritative
+                                    # (Higher confidence or valid OCR result), override ghost.
+                                    is_new_best = False
+                                    is_valid_pattern = self.plate_ocr.validate_indian_plate(text) if text else False
+                                    
+                                    # If we have a valid pattern, it's verified
+                                    if is_valid_pattern:
+                                        is_verified_identity = True
+
+                                    if det.track_id not in self.plate_relative_offsets:
+                                        # First time locking REQUIRES VLM verification, Valid Pattern, or Consensus
+                                        if is_verified_identity:
                                             is_new_best = True
-                                        elif is_valid_pattern and self.plate_ghost_count[det.track_id] > 0:
-                                            # Valid pattern overrides any ghost
-                                            is_new_best = True
-                                        elif conf > 0.7 and self.plate_ghost_count[det.track_id] > 5:
-                                            # Strong detection overrides stale ghost
-                                            is_new_best = True
-                                        
-                                        # Fallback to LLM if standard OCR is weak and consensus isn't reached
-                                        if (not text or len(text) < 5) and self.llm_provider:
-                                            # ... rest of LLM logic stays same ...
-                                            if det.track_id not in self.llm_attempted_plates:
-                                                if self.llm_rate_limiter.can_request():
-                                                    # Use the BEST crop from accumulator for LLM call
-                                                    best_crops = self.plate_accumulator.best_crops.get(det.track_id, [])
-                                                    llm_crop = best_crops[0][1] if best_crops else cropped
-                                                    
-                                                    logger.info(f"AI Action: Requesting LLM Plate Reading for ID {det.track_id}")
-                                                    llm_text, llm_conf = self.llm_provider.read_plate(llm_crop)
-                                                    logger.info(f"AI Reaction: LLM read plate {det.track_id} as '{llm_text}'")
-                                                    if llm_text:
-                                                        text = llm_text
-                                                        conf = llm_conf
-                                                        self.llm_attempted_plates.add(det.track_id)
-                                                        det.llm_verified = True
-                                                        # Put LLM result back into accumulator
-                                                        self.plate_accumulator.confirmed_plates[det.track_id] = llm_text
-                                        
-                                        # Update cache
-                                        if text and (len(text) > 4 or conf > 0.8):
-                                            plate_text = text
-                                            self.vehicle_plates[det.track_id] = text
-                                        
-                                        # --- RE-LOCK RELATIVE POSITION ---
-                                        if is_new_best:
-                                            v_w = det.box[2] - det.box[0]
-                                            v_h = det.box[3] - det.box[1]
-                                            if v_w > 0 and v_h > 0:
-                                                self.plate_relative_offsets[det.track_id] = [
-                                                    (plate.box[0] - det.box[0]) / v_w,
-                                                    (plate.box[1] - det.box[1]) / v_h,
-                                                    (plate.box[2] - det.box[0]) / v_w,
-                                                    (plate.box[3] - det.box[1]) / v_h
-                                                ]
-                                                self.plate_ghost_count[det.track_id] = 0
-                                        break
-                                        
-                        # --- NEW: GHOST TRACKING (If detector missed this frame) ---
+                                    elif is_valid_pattern and self.plate_ghost_count[det.track_id] > 0:
+                                        # Valid pattern overrides any ghost
+                                        is_new_best = True
+                                    
+                                    # Fallback to LLM if standard OCR is weak and consensus isn't reached
+                                    if (not text or len(text) < 5) and self.llm_provider:
+                                        if det.track_id not in self.llm_attempted_plates:
+                                            if self.llm_rate_limiter.can_request():
+                                                # Use the BEST crop from accumulator for LLM call
+                                                best_crops = self.plate_accumulator.best_crops.get(det.track_id, [])
+                                                llm_crop = best_crops[0][1] if best_crops else cropped
+                                                
+                                                logger.info(f"AI Action: Requesting LLM Plate Reading for ID {det.track_id}")
+                                                llm_text, llm_conf = self.llm_provider.read_plate(llm_crop)
+                                                logger.info(f"AI Reaction: LLM read plate {det.track_id} as '{llm_text}'")
+                                                if llm_text:
+                                                    text = llm_text
+                                                    conf = llm_conf
+                                                    self.llm_attempted_plates.add(det.track_id)
+                                                    det.llm_verified = True
+                                                    # Put LLM result back into accumulator
+                                                    self.plate_accumulator.confirmed_plates[det.track_id] = llm_text
+                                    
+                                    # Update cache
+                                    if text and (len(text) > 4 or conf > 0.8):
+                                        plate_text = text
+                                        self.vehicle_plates[det.track_id] = text
+                                    
+                                    # --- RE-LOCK RELATIVE POSITION ---
+                                    if is_new_best:
+                                        v_w = det.box[2] - det.box[0]
+                                        v_h = det.box[3] - det.box[1]
+                                        if v_w > 0 and v_h > 0:
+                                            self.plate_relative_offsets[det.track_id] = [
+                                                (plate.box[0] - det.box[0]) / v_w,
+                                                (plate.box[1] - det.box[1]) / v_h,
+                                                (plate.box[2] - det.box[0]) / v_w,
+                                                (plate.box[3] - det.box[1]) / v_h
+                                            ]
+                                            self.plate_ghost_count[det.track_id] = 0
+                                    break
+                        
+                        # --- GHOST TRACKING DECAY ---
+                        # If a ghost has been active for a long time with NO successful OCR,
+                        # it's likely a false positive (headlight). Clear the lock.
+                        if self.plate_ghost_count.get(det.track_id, 0) > 20 and not plate_text:
+                            if det.track_id in self.plate_relative_offsets:
+                                logger.info(f"RCA Action: Clearing stale headlight-lock for ID {det.track_id}")
+                                del self.plate_relative_offsets[det.track_id]
+
+                        # --- GHOST TRACKING (If detector missed this frame) ---
                         if not any(boxes_overlap(det.box, p.box, threshold=0.01) for p in plate_dets):
                             if det.track_id in self.plate_relative_offsets:
                                 self.plate_ghost_count[det.track_id] += 1
