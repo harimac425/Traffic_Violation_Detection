@@ -20,6 +20,8 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
+from src.utils import is_person_on_motorcycle
+
 
 @dataclass
 class PhoneViolation:
@@ -242,16 +244,17 @@ class MediaPipePhoneDetector:
             person_bbox = person.get('bbox', [0, 0, 0, 0])
             track_id = person.get('track_id')
             
-            # Check if this person is on a motorcycle (relaxed association)
+            # Check if this person is on a motorcycle (robust heuristic)
             on_motorcycle = False
             for moto in motorcycles:
                 moto_bbox = moto.get('bbox', [0, 0, 0, 0])
-                iou = self._calculate_iou(person_bbox, moto_bbox)
-                if iou > iou_threshold:
+                if is_person_on_motorcycle(person_bbox, moto_bbox):
                     on_motorcycle = True
                     break
-                # Fallback: check if person overlaps motorcycle at all
-                if self._boxes_overlap_any(person_bbox, moto_bbox):
+                
+                # Fallback to IoU if 1st heuristic fails (e.g. extreme angles)
+                iou = self._calculate_iou(person_bbox, moto_bbox)
+                if iou > 0.05:
                     on_motorcycle = True
                     break
             

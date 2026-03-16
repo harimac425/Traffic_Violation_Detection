@@ -551,12 +551,22 @@ class DetectionThread(QThread):
                                                 self.llm_attempted_phones.add(det.track_id)
                                                 
                                                 if is_using_phone:
+                                                    # Associate phone usage with the rider (person) track ID if possible
+                                                    target_track_id = det.track_id
+                                                    target_box = det.box
+                                                    
+                                                    # Find the rider (person) associated with this motorcycle
+                                                    riders = [r for r in main_dets if r.class_name == "person" and is_person_on_motorcycle(r.box, det.box)]
+                                                    if riders:
+                                                        target_track_id = riders[0].track_id
+                                                        target_box = riders[0].box
+                                                        
                                                     # Add phone usage violation
-                                                    if not any(v.track_id == det.track_id and v.type == "PHONE_USAGE" for v in violations):
+                                                    if not any(v.track_id == target_track_id and v.type == "PHONE_USAGE" for v in violations):
                                                         new_v = Violation(
                                                             type="PHONE_USAGE",
-                                                            vehicle_box=det.box,
-                                                            track_id=det.track_id,
+                                                            vehicle_box=target_box,
+                                                            track_id=target_track_id,
                                                             confidence=0.99,
                                                             timestamp=time.time(),
                                                             details=f"AI VOTED: {phone_reason}"
@@ -1327,6 +1337,10 @@ class MainWindow(QMainWindow):
         
         # Draw main detections
         for det in detections.get("main", []):
+            cls_name = det.class_name.lower().strip()
+            if cls_name == "cell phone":
+                continue  # Skip drawing phone boxes as requested
+                
             display_name = det.class_name
             # Only show rider count if TRIPLE_RIDING toggle is enabled
             if det.class_name == "motorcycle" and hasattr(det, "rider_count") and config.ENABLED_VIOLATIONS.get("TRIPLE_RIDING", True):
@@ -1337,9 +1351,18 @@ class MainWindow(QMainWindow):
             # Default color: Green if okay, Orange if questionable, Red if violating
             color = (0, 255, 0) # Green
             
+            # Specific color logic for Phone Usage Violations (Highlight the person red)
+            is_phone_violator = False
+            for v in violations:
+                if v.type == "PHONE_USAGE" and v.track_id == det.track_id:
+                    is_phone_violator = True
+                    break
+            
             if det.track_id in violator_ids:
                 color = (0, 0, 255) # Red for violators
-                label = f"VIOLATION! {det.class_name.upper()}"
+                # Find specific violation for label
+                v_type = next((v.type for v in violations if v.track_id == det.track_id), det.class_name)
+                label = f"VIOLATION! {v_type.replace('_', ' ').upper()}"
             elif "Riders" in det.class_name:
                 # Highlight motorcycles with riders to show association is working
                 color = (255, 165, 0) # Orange
@@ -1473,8 +1496,15 @@ class MainWindow(QMainWindow):
         self.device_status.setToolTip(f"Active Device: {device_name}")
         if "GPU" in device_name:
             self.device_status.setText("🚀")
+            self.device_status.setStyleSheet("color: #10B981; font-weight: 700;") # Green
+        elif getattr(config, 'HAS_NVIDIA_HARDWARE', False):
+            # Hardware detected but not used by Torch
+            self.device_status.setText("⚠️")
+            self.device_status.setStyleSheet("color: #FACC15; font-weight: 700;") # Warning Yellow
+            self.device_status.setToolTip("NVIDIA Hardware found, but GPU Engine not installed. Run 'fix_gpu.bat'.")
         else:
             self.device_status.setText("🟢")
+            self.device_status.setStyleSheet("color: #CBD5E1; font-weight: 700;") # Gray
     
     def add_violation_to_log(self, violation: Violation):
         """Add a violation to the log list"""

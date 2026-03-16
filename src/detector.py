@@ -112,9 +112,11 @@ class MultiModelDetector:
         }
         
         # Apply CLAHE if enabled (for CCTV enhancement)
-        inference_frame = frame
+        full_enhanced_frame = frame
         if getattr(config, 'ENABLE_CLAHE', False):
-            inference_frame = self._apply_clahe(frame)
+            full_enhanced_frame = self._apply_clahe(frame)
+        
+        inference_frame = full_enhanced_frame
         
         # --- DYNAMIC ROI OPTIMIZATION ---
         inference_box = None
@@ -210,7 +212,7 @@ class MultiModelDetector:
                     x1 = max(0, x1 - margin_x); y1 = max(0, y1 - margin_y)
                     x2 = min(w, x2 + margin_x); y2 = min(h, y2 + margin_y)
                     
-                    crop = inference_frame[y1:y2, x1:x2]
+                    crop = full_enhanced_frame[y1:y2, x1:x2]
                     if crop.size == 0: continue
                     
                     crop_detections = self._run_model(
@@ -247,7 +249,7 @@ class MultiModelDetector:
                 x1 = max(0, x1 - margin); y1 = max(0, y1 - margin)
                 x2 = min(w, x2 + margin); y2 = min(h, y2 + margin)
                 
-                crop = inference_frame[y1:y2, x1:x2]
+                crop = full_enhanced_frame[y1:y2, x1:x2]
                 if crop.size == 0: continue
                 
                 crop_plates = self._run_model(

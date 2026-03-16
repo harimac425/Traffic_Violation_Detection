@@ -30,7 +30,10 @@ def export_project():
         "main.py", 
         "config.py", 
         "requirements.txt", 
-        "README.md"
+        "README.md",
+        "README_INSTALL.txt",
+        "install_python_310.bat",
+        "fix_gpu.bat"
     ]
     
     for f in files_to_copy:

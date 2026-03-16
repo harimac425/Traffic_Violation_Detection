@@ -69,6 +69,17 @@ DEVICE_TYPE = "auto"  # Can be "cpu", "cuda", or "auto"
 DEVICE, DEVICE_NAME = get_device(DEVICE_TYPE)
 CUDA_AVAILABLE = torch.cuda.is_available()
 
+def check_nvidia_smi():
+    """Diagnostic check for NVIDIA hardware regardless of torch state"""
+    import subprocess
+    try:
+        subprocess.run(["nvidia-smi"], capture_output=True, check=True)
+        return True
+    except:
+        return False
+
+HAS_NVIDIA_HARDWARE = check_nvidia_smi()
+
 # ============================================================
 # Detection Settings
 # ============================================================

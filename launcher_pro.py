@@ -23,6 +23,8 @@ BOOTSTRAP_LOG = LOG_DIR / "bootstrap.log"
 REQUIREMENTS_FILE = Path("requirements.txt")
 MAIN_SCRIPT = Path("main.py")
 MODELS_DIR = Path("models")
+REPAIR_ATTEMPTS = 0
+MAX_REPAIR_ATTEMPTS = 2
 
 # --- Logging Setup ---
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -131,6 +133,9 @@ def get_python_path():
 
     # Validate all found paths
     visited_paths = set()
+    logger.info("[*] Filtering for STRICT Python 3.10 environment...")
+    
+    # First pass: Look for 3.10 explicitly
     for p in potential_interpreters:
         p = p.strip()
         if not p or p in visited_paths: continue
@@ -139,6 +144,20 @@ def get_python_path():
         if not os.path.exists(p): continue
         if not "python" in p.lower(): continue
         
+        # Check version
+        try:
+            v_check = subprocess.run([p, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], 
+                                   capture_output=True, text=True, timeout=2, check=False)
+            if v_check.returncode == 0 and v_check.stdout.strip() == "3.10":
+                logger.info(f"    [MATCH] Found verified Python 3.10: {p}")
+                return p
+        except:
+            continue
+
+    logger.warning("[!] No Python 3.10 installation found. The app requires 3.10 for stability.")
+    
+    # Second pass: Fallback to any working python but warn
+    for p in visited_paths:
         # CRITICAL: Skip if it's the EXE itself (recursion protection)
         if IS_FROZEN and str(EXE_PATH).lower() in p.lower():
             continue
@@ -151,6 +170,7 @@ def get_python_path():
         try:
             test = subprocess.run([p, "-c", "import sys; print('ready')"], capture_output=True, text=True, timeout=2, check=False)
             if test.returncode == 0 and "ready" in test.stdout:
+                logger.warning(f"    [FALLBACK] Using alternate version: {p}")
                 return p
         except:
             continue
@@ -159,6 +179,30 @@ def get_python_path():
     if not IS_FROZEN:
         return sys.executable
         
+    # 5. Filter for STABLE versions only (Ignore 3.13, 3.14+ for AI apps)
+    logger.info("[*] Filtering for compatible AI environments (3.10 to 3.12)...")
+    stable_paths = []
+    for p in visited_paths:
+        try:
+            v_check = subprocess.run([p, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], 
+                                   capture_output=True, text=True, timeout=2, check=False)
+            if v_check.returncode == 0:
+                v_str = v_check.stdout.strip()
+                if v_str in ["3.10", "3.11", "3.12"]:
+                    stable_paths.append(p)
+                    logger.info(f"    [MATCH] Found stable {v_str}: {p}")
+        except:
+            continue
+            
+    if stable_paths:
+        return stable_paths[0] # Prefer the first stable one found
+    
+    # If NO stable versions found, but we have ANY python, warn the user
+    if potential_interpreters:
+        best_bad_bet = potential_interpreters[0]
+        logger.warning(f"[!] No stable versions (3.10-3.12) found. Using best available: {best_bad_bet}")
+        return best_bad_bet
+
     return None
 
 PYTHON_EXE = get_python_path()
@@ -191,10 +235,11 @@ def check_python():
     major, minor = sys.version_info[:2]
     logger.info(f"[*] Native Python detected: {major}.{minor}")
     
-    # We want 3.10-3.12 for maximum compatibility with PyTorch/MediaPipe
-    if major != 3 or minor < 10 or minor > 12:
-        logger.warning(f"[!] Warning: Python {major}.{minor} is outside recommended range (3.10-3.12).")
-        logger.warning("[!] If you encounter DLL errors, please downgrade to Python 3.10.")
+    # We strictly want 3.10 for the "Self-Healing" release
+    if major != 3 or minor != 10:
+        logger.error(f"[!] ERROR: Python {major}.{minor} detected. Python 3.10 is REQUIRED.")
+        logger.error("[!] Please run 'install_python_310.bat' from the app folder.")
+        return False
     return True
 
 def check_gpu():
@@ -262,6 +307,34 @@ def repair_torch(cpu_only=True):
         logger.error(f"[ERROR] Repair failed: {err}")
         return False
 
+def trigger_python_310_install():
+    """Automatically installs Python 3.10 using winget if verified version is missing."""
+    logger.warning("\n" + "!" * 60)
+    logger.warning("  STABILITY ALERT: Python 3.10 is required but not found.")
+    logger.warning("!" * 60)
+    print("\n[*] Would you like to automatically install the verified Python 3.10 environment? (y/n): ", end="")
+    choice = input().lower().strip()
+    if choice != 'y':
+        logger.error("[FATAL] Manual installation required. Please use 'install_python_310.bat'.")
+        return False
+        
+    logger.info("[*] Launching Automated Python 3.10 Installer...")
+    # We use winget directly for the most seamless experience
+    cmd = [
+        "winget", "install", "Python.Python.3.10", 
+        "--version", "3.10.11", "--silent", 
+        "--accept-package-agreements", "--accept-source-agreements"
+    ]
+    
+    rc, out, err = run_command(cmd, stream=True)
+    if rc == 0:
+        logger.info("[SUCCESS] Python 3.10.11 installed. Please restart the application.")
+        return True
+    else:
+        logger.error(f"[ERROR] Automated install failed (Code: {rc}).")
+        logger.error("Please run 'install_python_310.bat' manually as Administrator.")
+        return False
+
 def install_dependencies():
     """Force-installs all required dependencies from requirements.txt."""
     if not REQUIREMENTS_FILE.exists():
@@ -309,19 +382,54 @@ def launch_application():
             if line:
                 print(line.strip(), file=sys.stderr) # Keep printing to console
                 
-                # Check for the specific PyTorch/CUDA crash
-                if "WinError 1114" in line or "c10.dll" in line:
-                    logger.error("[CRITICAL] Detected AI Engine crash (DLL load failure).")
+                # --- SELF-HEALING TRIGGERS ---
+                global REPAIR_ATTEMPTS
+                
+                # Check if we should even attempt repair (Protect against loops on incompatible Python)
+                major, minor = sys.version_info[:2]
+                can_repair = (major == 3 and 10 <= minor <= 12)
+                
+                if not can_repair and ("ModuleNotFoundError" in line or "No module named" in line or "AttributeError" in line):
+                    logger.error("[CRITICAL] Environment Incompatibility: Auto-repair disabled for Python 3.13+")
+                    logger.error("Please switch to Python 3.11 for a stable experience.")
+                    process.terminate()
+                    sys.exit(1)
+
+                # 1. Check for missing modules
+                if "ModuleNotFoundError" in line or "No module named" in line:
+                    if REPAIR_ATTEMPTS >= MAX_REPAIR_ATTEMPTS:
+                        logger.error("[FATAL] Multiple repair attempts failed. Stopping to prevent loop.")
+                        process.terminate()
+                        sys.exit(1)
+                        
+                    REPAIR_ATTEMPTS += 1
+                    logger.error(f"[SELF-HEAL] Detected missing dependency: {line.strip()}")
+                    process.terminate()
+                    logger.info(f"[*] Attempting to auto-install (Attempt {REPAIR_ATTEMPTS}/{MAX_REPAIR_ATTEMPTS})...")
+                    if install_dependencies():
+                        logger.info("[OK] Dependencies repaired. Restarting application...")
+                        time.sleep(2)
+                        return launch_application()
+                
+                # 2. Check for the specific PyTorch/CUDA crash (DLL load failure)
+                if "WinError 1114" in line or "c10.dll" in line or "AttributeError: module 'torch' has no attribute 'save'" in line:
+                    if REPAIR_ATTEMPTS >= MAX_REPAIR_ATTEMPTS:
+                        logger.error("[FATAL] AI Engine repair failed multiple times. Stopping.")
+                        process.terminate()
+                        sys.exit(1)
+                        
+                    REPAIR_ATTEMPTS += 1
+                    logger.error("[CRITICAL] Detected AI Engine crash (DLL load failure or broken Torch).")
                     process.terminate()
                     
                     if repair_torch(cpu_only=True):
-                        logger.info("[*] Self-heal successful. Restarting application...")
+                        logger.info(f"[*] Self-heal successful (Attempt {REPAIR_ATTEMPTS}). Restarting...")
                         return launch_application() # Re-launch
                     else:
                         logger.error("[FATAL] Auto-repair failed. Please contact engineering support.")
                         sys.exit(1)
                         
-        if process.returncode != 0:
+        if process.poll() is not None and process.returncode != 0:
             logger.warning(f"[*] Application closed with exit code {process.returncode}")
             
     except Exception as e:
@@ -337,17 +445,21 @@ def main():
     log_header()
     
     # Check if we even found a Python interpreter
+    global PYTHON_EXE
     if not PYTHON_EXE:
-        logger.error("[FATAL] A valid Python interpreter could not be found.")
-        logger.error("Please ensure Python 3.10-3.12 is installed and added to your System PATH.")
-        logger.error("Download from: https://www.python.org/downloads/")
-        input("Press Enter to exit...")
-        sys.exit(1)
+        if trigger_python_310_install():
+            input("Install complete. Press Enter to exit and re-launch...")
+            sys.exit(0)
+        else:
+            sys.exit(1)
 
     logger.info(f"[*] Targeting Verified Python: {PYTHON_EXE}")
     
     # Phase 1: Environment Integrity
-    check_python()
+    if not check_python():
+        input("Press Enter to close...")
+        sys.exit(1)
+        
     gpu_available = check_gpu()
     
     # Phase 2: Dependency Sync
