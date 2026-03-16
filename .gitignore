@@ -4,7 +4,6 @@ __pycache__/
 python_env/
 app_source.zip
 Traffic_Violation_Detection-main/
-TVDS.exe
 TVDS_old.exe
 build/
 dist/
