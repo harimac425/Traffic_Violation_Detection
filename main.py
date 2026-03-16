@@ -1,4 +1,4 @@
-"""
+﻿"""
 Traffic Violation Detection System
 Main Entry Point
 
@@ -21,7 +21,7 @@ sys.path.insert(0, str(project_root))
 # Fix for OpenMP/MKL DLL conflicts
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # Support for portable python environment DLL discovery
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     # This logic only applies when running as a compiled EXE
     python_env_dir = project_root.parent / "python_env"
     if python_env_dir.exists():
