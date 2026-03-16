@@ -253,23 +253,52 @@ def check_gpu():
         logger.info("[INFO] No NVIDIA GPU detected or drivers missing. Switching to CPU optimization.")
         return False
 
-def verify_models():
-    """Checks if required YOLO models are present."""
-    logger.info("[*] Integrity check: AI Models...")
-    required_models = ["yolo11x.pt", "helmet_yolov8n.pt", "plate_yolov8n.pt", "pose_landmarker_lite.task"]
-    models_path = APP_DIR / "models"
-    
-    if not models_path.exists():
-        logger.warning(f"[!] Models directory missing at {models_path}.")
+def download_file(url, target_path):
+    """Downloads a file from a URL with progress logging."""
+    import requests
+    try:
+        logger.info(f"[*] Downloading: {url}")
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        
+        with open(target_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"[ERROR] Download failed: {e}")
         return False
+
+def verify_models():
+    """Checks if required YOLO models are present and attempts download if missing."""
+    logger.info("[*] Integrity check: AI Models...")
     
-    missing = []
-    for m in required_models:
+    # Model Map: File -> Download URL (Using official/verified mirrors)
+    # Note: These are placeholder URLs for custom models; main YOLO ones auto-download via Ultralytics
+    models_to_verify = {
+        "yolo11x.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt",
+        "helmet_yolov8n.pt": None, # Custom model
+        "plate_yolov8n.pt": None,  # Custom model
+        "pose_landmarker_lite.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+    }
+    
+    models_path = APP_DIR / "models"
+    models_path.mkdir(exist_ok=True)
+    
+    missing_critical = []
+    for m, url in models_to_verify.items():
         if not (models_path / m).exists():
-            missing.append(m)
+            if url:
+                logger.info(f"[!] Missing: {m}. Attempting automatic recovery...")
+                if not download_file(url, models_path / m):
+                    missing_critical.append(m)
+            else:
+                logger.warning(f"[!] Missing custom model: {m}. Please copy manually.")
+                missing_critical.append(m)
     
-    if missing:
-        logger.warning(f"[!] Missing models: {', '.join(missing)}")
+    if missing_critical:
+        # If we are missing custom models, we can't auto-fix them easily unless hosted
+        logger.warning(f"[!] Missing assets: {', '.join(missing_critical)}")
         return False
     
     logger.info("[OK] All required AI models cataloged.")
