@@ -1,0 +1,14 @@
+names:
+- '0'
+- '1'
+- '2'
+nc: 3
+roboflow:
+  license: CC BY 4.0
+  project: helmet-2cb7p-lprrq
+  url: https://universe.roboflow.com/yugank/helmet-2cb7p-lprrq/dataset/1
+  version: 1
+  workspace: yugank
+test: ../test/images
+train: ../train/images
+val: ../valid/images

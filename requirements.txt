@@ -1,3 +1,4 @@
+# Core processing
 ultralytics
 torch
 torchvision
@@ -7,7 +8,7 @@ filterpy
 scipy
 mediapipe
 easyocr
-
+# Removed paddlepaddle/paddleocr due to compatibility issues on Python 3.12+
 google-generativeai
 openai
 python-docx

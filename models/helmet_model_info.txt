@@ -1,0 +1,9 @@
+Helmet Detection Model Configuration
+========================================
+Expected classes:
+  0: helmet
+  1: no_helmet OR head
+
+Recommended datasets:
+  - Roboflow: safety-helmet-dataset
+  - Roboflow: helmet-detection (multiple versions)

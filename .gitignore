@@ -1,16 +1,72 @@
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-python_env/
-app_source.zip
-Traffic_Violation_Detection-main/
-TVDS_old.exe
-build/
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
 dist/
-*.spec
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+venv/
+env/
+.env
+.venv/
+ENV/
+
+# IDEs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+
+# Large model files (auto-downloaded by launcher)
+# Keep custom models (< 100MB) but exclude very large ones
+yolo11x.pt
+yolo11m.pt
+*.pth
+*.onnx
+
+# Database and evidence data (user-generated)
+violations.db
 evidence/
 logs/
 reports/
-models/
-.env
+
+# API keys / settings
 settings.json
+.env
+
+# Temp files
+*.tmp
+*.bak
+*.log
+C:/tmp/
+
+# Large media
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Presentation / documentation artifacts (optional)
+*.docx
+*.pptx
+*.gif
+
+# Cache
+models/.cache/

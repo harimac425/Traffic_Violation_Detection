@@ -1496,8 +1496,15 @@ class MainWindow(QMainWindow):
         self.device_status.setToolTip(f"Active Device: {device_name}")
         if "GPU" in device_name:
             self.device_status.setText("🚀")
+            self.device_status.setStyleSheet("color: #10B981; font-weight: 700;") # Green
+        elif getattr(config, 'HAS_NVIDIA_HARDWARE', False):
+            # Hardware detected but not used by Torch
+            self.device_status.setText("⚠️")
+            self.device_status.setStyleSheet("color: #FACC15; font-weight: 700;") # Warning Yellow
+            self.device_status.setToolTip("NVIDIA Hardware found, but GPU Engine not installed. Run 'fix_gpu.bat'.")
         else:
             self.device_status.setText("🟢")
+            self.device_status.setStyleSheet("color: #CBD5E1; font-weight: 700;") # Gray
     
     def add_violation_to_log(self, violation: Violation):
         """Add a violation to the log list"""
