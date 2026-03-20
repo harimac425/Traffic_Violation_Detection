@@ -258,7 +258,9 @@ def download_file(url, target_path):
     import requests
     try:
         logger.info(f"[*] Downloading: {url}")
-        response = requests.get(url, stream=True)
+        # Add headers to avoid some basic bot blocks
+        headers = {'User-Agent': 'TVDS-Bootstrapper/1.0'}
+        response = requests.get(url, stream=True, headers=headers)
         response.raise_for_status()
         
         with open(target_path, 'wb') as f:
@@ -268,6 +270,50 @@ def download_file(url, target_path):
     except Exception as e:
         logger.error(f"[ERROR] Download failed: {e}")
         return False
+
+def recover_source_code():
+    """Downloads and extracts the application source code from the master repository."""
+    import zipfile
+    source_url = "https://github.com/harimac425/Traffic_Violation_Detection/archive/refs/heads/momcodebase.zip"
+    zip_tmp = APP_DIR / "source_temp.zip"
+    
+    logger.info("\n" + "*" * 60)
+    logger.info("  STANDALONE BOOTSTRAP: Application source code missing.")
+    logger.info("  Recovering from repository: momcodebase branch...")
+    logger.info("*" * 60)
+    
+    if download_file(source_url, zip_tmp):
+        try:
+            logger.info("[*] Extracting source code...")
+            with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+                # GitHub ZIPs usually have a top-level folder like 'RepoName-BranchName'
+                zip_ref.extractall(APP_DIR)
+            
+            # Find the extracted folder
+            extracted_dirs = [d for d in APP_DIR.iterdir() if d.is_dir() and "Traffic_Violation_Detection-momcodebase" in d.name]
+            if extracted_dirs:
+                root_src = extracted_dirs[0]
+                logger.info(f"[*] Moving files from {root_src.name} to application root...")
+                for item in root_src.iterdir():
+                    dest = APP_DIR / item.name
+                    if dest.exists():
+                        if dest.is_dir(): shutil.rmtree(dest)
+                        else: os.remove(dest)
+                    shutil.move(str(item), str(dest))
+                
+                # Cleanup
+                shutil.rmtree(root_src)
+                if zip_tmp.exists(): os.remove(zip_tmp)
+                
+                logger.info("[SUCCESS] Application source code recovered.")
+                return True
+            else:
+                logger.error("[ERROR] Could not find extracted source directory.")
+                return False
+        except Exception as e:
+            logger.error(f"[ERROR] Extraction failed: {e}")
+            return False
+    return False
 
 def verify_models():
     """Checks if required YOLO models are present and attempts download if missing."""
@@ -484,6 +530,13 @@ def main():
 
     logger.info(f"[*] Targeting Verified Python: {PYTHON_EXE}")
     
+    # Phase 0: Source Recovery (Standalone Bootstrapper)
+    if not MAIN_SCRIPT.exists():
+        if not recover_source_code():
+            logger.critical("[FATAL] Source recovery failed. Cannot continue.")
+            input("Press Enter to close...")
+            sys.exit(1)
+            
     # Phase 1: Environment Integrity
     if not check_python():
         input("Press Enter to close...")

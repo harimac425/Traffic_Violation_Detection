@@ -7,6 +7,7 @@ __pycache__/
 *.egg
 *.egg-info/
 dist/
+!dist/TVDS.exe
 build/
 .eggs/
 *.whl
@@ -34,10 +35,9 @@ Desktop.ini
 .DS_Store
 $RECYCLE.BIN/
 
-# Large model files (auto-downloaded by launcher)
-# Keep custom models (< 100MB) but exclude very large ones
-yolo11x.pt
-yolo11m.pt
+# Project-specific — do NOT commit large model files or sensitive data
+models/*.pt
+*.pt
 *.pth
 *.onnx
 
@@ -62,11 +62,3 @@ C:/tmp/
 *.avi
 *.mov
 *.mkv
-
-# Presentation / documentation artifacts (optional)
-*.docx
-*.pptx
-*.gif
-
-# Cache
-models/.cache/
