@@ -25,6 +25,8 @@ MAIN_SCRIPT = Path("main.py")
 MODELS_DIR = Path("models")
 REPAIR_ATTEMPTS = 0
 MAX_REPAIR_ATTEMPTS = 2
+PYTHON_ENV_DIR = APP_DIR / "python_env"
+LOCAL_PYTHON_EXE = PYTHON_ENV_DIR / "python.exe"
 
 # --- Logging Setup ---
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -99,8 +101,13 @@ def get_python_from_registry():
     return found_paths
 
 def get_python_path():
-    """Searches for a valid Python interpreter in the system."""
+    """Searches for a valid Python interpreter, prioritizing the local portable environment."""
     potential_interpreters = []
+
+    # 0. Local Portable Environment (Highest Priority)
+    if LOCAL_PYTHON_EXE.exists():
+        logger.info(f"[OK] Local Portable Python detected: {LOCAL_PYTHON_EXE}")
+        return str(LOCAL_PYTHON_EXE)
 
     # 1. Registry Lookup (Most consistent as requested)
     logger.info("[*] Searching Windows Registry for Python installations...")
@@ -230,17 +237,27 @@ def run_command(cmd, wait=True, stream=False, use_system_python=False):
 # --- Environment Checks ---
 
 def check_python():
-    """Verifies Python installation and PATH."""
-    logger.info("[*] Verifying Python Environment...")
-    major, minor = sys.version_info[:2]
-    logger.info(f"[*] Native Python detected: {major}.{minor}")
+    """Verifies the targeted Python environment's version."""
+    logger.info(f"[*] Verifying Targeted Python: {PYTHON_EXE}")
     
-    # We strictly want 3.10 for the "Self-Healing" release
-    if major != 3 or minor != 10:
-        logger.error(f"[!] ERROR: Python {major}.{minor} detected. Python 3.10 is REQUIRED.")
-        logger.error("[!] Please run 'install_python_310.bat' from the app folder.")
+    try:
+        # Check version of the TARGET python, not the launcher's own python
+        v_check = subprocess.run([PYTHON_EXE, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], 
+                               capture_output=True, text=True, timeout=5, check=False)
+        if v_check.returncode == 0:
+            v_str = v_check.stdout.strip()
+            logger.info(f"[*] Targeted Python Version: {v_str}")
+            if v_str == "3.10":
+                return True
+            else:
+                logger.error(f"[!] ERROR: Target Python is {v_str}. Python 3.10 is REQUIRED for AI stability.")
+                return False
+    except Exception as e:
+        logger.error(f"[!] Failed to verify Python version: {e}")
         return False
-    return True
+    
+    return False
+捉
 
 def check_gpu():
     """Checks if a compatible NVIDIA GPU is available."""
@@ -323,6 +340,67 @@ def recover_source_code():
         except Exception as e:
             logger.error(f"[ERROR] Extraction failed: {e}")
             return False
+    return False
+
+def bootstrap_pip():
+    """Installs PIP and configures the portable environment's .pth file."""
+    logger.info("[*] Bootstrapping PIP for portable environment...")
+    pip_root = APP_DIR / "temp_pip"
+    pip_root.mkdir(exist_ok=True)
+    get_pip_script = pip_root / "get-pip.py"
+    
+    url = "https://bootstrap.pypa.io/get-pip.py"
+    if download_file(url, get_pip_script):
+        rc, out, err = run_command([str(LOCAL_PYTHON_EXE), str(get_pip_script)], stream=True)
+        if rc == 0:
+            logger.info("[SUCCESS] PIP bootstrapped.")
+            
+            # CRITICAL: Modify python310._pth to enable site-packages
+            pth_file = PYTHON_ENV_DIR / "python310._pth"
+            if pth_file.exists():
+                logger.info("[*] Configuring .pth for site-packages support...")
+                with open(pth_file, 'r') as f:
+                    lines = f.readlines()
+                
+                # Check if 'import site' is already uncommented
+                with open(pth_file, 'w') as f:
+                    for line in lines:
+                        if line.strip() == "#import site":
+                            f.write("import site\n")
+                        else:
+                            f.write(line)
+            
+            shutil.rmtree(pip_root, ignore_errors=True)
+            return True
+    return False
+
+def install_portable_python():
+    """Downloads and sets up a standalone Python 3.10.11 environment."""
+    url = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip"
+    zip_tmp = APP_DIR / "python_tmp.zip"
+    
+    logger.info("\n" + "=" * 60)
+    logger.info("  PORTABLE SETUP: Initializing local Python 3.10 environment...")
+    logger.info("=" * 60)
+    
+    if download_file(url, zip_tmp):
+        try:
+            logger.info(f"[*] Extracting Python to {PYTHON_ENV_DIR}...")
+            import zipfile
+            PYTHON_ENV_DIR.mkdir(exist_ok=True)
+            with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+                zip_ref.extractall(PYTHON_ENV_DIR)
+            
+            if zip_tmp.exists(): os.remove(zip_tmp)
+            
+            # Step 2: Bootstrap PIP
+            if bootstrap_pip():
+                logger.info("[SUCCESS] Portable Python 3.10.11 is ready.")
+                global PYTHON_EXE
+                PYTHON_EXE = str(LOCAL_PYTHON_EXE)
+                return True
+        except Exception as e:
+            logger.error(f"[ERROR] Portable setup failed: {e}")
     return False
 
 def verify_models():
@@ -532,7 +610,10 @@ def main():
     # Check if we even found a Python interpreter
     global PYTHON_EXE
     if not PYTHON_EXE:
-        if trigger_python_310_install():
+        # If no Python found, try portable install first (User wanted auto-setup)
+        if install_portable_python():
+            logger.info("[OK] Continuing with local environment.")
+        elif trigger_python_310_install():
             input("Install complete. Press Enter to exit and re-launch...")
             sys.exit(0)
         else:
