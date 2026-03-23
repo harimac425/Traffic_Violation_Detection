@@ -293,6 +293,16 @@ def recover_source_code():
             return False
     return False
 
+def check_pip():
+    """Verifies if PIP is available and functional in the targeted environment."""
+    logger.info("[*] Verifying PIP availability...")
+    rc, out, err = run_command([PYTHON_EXE, "-m", "pip", "--version"])
+    if rc == 0:
+        logger.info(f"[OK] PIP detected: {out.strip()}")
+        return True
+    logger.warning("[!] PIP is missing or broken in the current environment.")
+    return False
+
 def bootstrap_pip():
     """Installs PIP and configures the portable environment's .pth file."""
     logger.info("[*] Bootstrapping PIP for portable environment...")
@@ -314,12 +324,20 @@ def bootstrap_pip():
                     lines = f.readlines()
                 
                 # Check if 'import site' is already uncommented
+                has_site = any(line.strip() == "import site" for line in lines)
+                has_site_packages = any("site-packages" in line for line in lines)
+                
                 with open(pth_file, 'w') as f:
                     for line in lines:
-                        if line.strip() == "#import site":
-                            f.write("import site\n")
+                        if line.strip() == "#import site" or line.strip() == "import site":
+                            if not has_site:
+                                f.write("import site\n")
+                                has_site = True
                         else:
                             f.write(line)
+                    
+                    if not has_site_packages:
+                        f.write("Lib/site-packages\n")
             
             shutil.rmtree(pip_root, ignore_errors=True)
             return True
@@ -442,10 +460,12 @@ def trigger_python_310_install():
 
 def install_dependencies():
     """Force-installs all required dependencies from requirements.txt."""
-    if not REQUIREMENTS_FILE.exists():
-        logger.error("[ERROR] Missing requirements.txt. Cannot verify environment.")
-        return False
-        
+    # Ensure PIP is available first
+    if not check_pip():
+        if not bootstrap_pip():
+            logger.error("[FATAL] Could not bootstrap PIP. Manual intervention required.")
+            return False
+            
     logger.info("[*] Syncing application dependencies... (this may take a minute)")
     logger.info("[INFO] DETAILED INSTALL LOGS WILL BE SHOWN BELOW:")
     logger.info("-" * 40)
