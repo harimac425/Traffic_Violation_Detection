@@ -423,16 +423,7 @@ def repair_torch(cpu_only=True):
 
 def trigger_python_310_install():
     """Automatically installs Python 3.10 using winget if verified version is missing."""
-    logger.warning("\n" + "!" * 60)
-    logger.warning("  STABILITY ALERT: Python 3.10 is required but not found.")
-    logger.warning("!" * 60)
-    print("\n[*] Would you like to automatically install the verified Python 3.10 environment? (y/n): ", end="")
-    choice = input().lower().strip()
-    if choice != 'y':
-        logger.error("[FATAL] Manual installation required. Please use 'install_python_310.bat'.")
-        return False
-        
-    logger.info("[*] Launching Automated Python 3.10 Installer...")
+    logger.info("[*] Launching Automated Python 3.10 Installer (winget mode)...")
     # We use winget directly for the most seamless experience
     cmd = [
         "winget", "install", "Python.Python.3.10", 
@@ -597,9 +588,11 @@ def main():
     # Phase 4: Launch & Monitor
     launch_application()
     
-    # Keep window open if something failed or finished
     logger.info("[*] System operations completed.")
-    input("Press Enter to close this window...")
+    # We only pause for input if there was a fatal error earlier, 
+    # but for a successful launch-and-close, we can exit cleanly.
+    # However, keeping a 2-second delay helps visibility.
+    time.sleep(2)
 
 if __name__ == "__main__":
     try:
