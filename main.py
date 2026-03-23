@@ -1,15 +1,23 @@
-"""
-Traffic Violation Detection System
-Main Entry Point
-
-Run this file to start the application.
-"""
-import sys
+import sys, os
 from pathlib import Path
 
-# Add project root to path
+# Add project root and DLL search paths
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
+
+if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+    print("[*] Registering DLL search paths...")
+    # Add root and site-packages/torch/lib etc
+    site_packages = project_root / "python_env" / "Lib" / "site-packages"
+    dll_paths = [
+        project_root / "python_env",
+        site_packages / "torch" / "lib",
+        site_packages / "cv2"
+    ]
+    for path in dll_paths:
+        if path.exists():
+            os.add_dll_directory(str(path))
+            print(f"    [OK] Linked: {path.name}")
 
 def check_compatibility():
     """Verify system environment before launching"""

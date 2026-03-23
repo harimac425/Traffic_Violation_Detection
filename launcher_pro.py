@@ -609,7 +609,9 @@ def launch_application():
                     logger.error("[CRITICAL] Detected AI Engine crash (DLL load failure or broken Torch).")
                     process.terminate()
                     
-                    if repair_torch(cpu_only=True):
+                    # Try to maintain GPU if it was found earlier
+                    has_gpu = os.environ.get("HAS_NVIDIA_GPU", "False") == "True"
+                    if repair_torch(cpu_only=not has_gpu):
                         logger.info(f"[*] Self-heal successful (Attempt {REPAIR_ATTEMPTS}). Restarting...")
                         return launch_application() # Re-launch
                     else:
@@ -645,6 +647,24 @@ def main():
         else:
             sys.exit(1)
 
+    # Windows DLL path injection for portable environments
+    if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+        site_packages = Path(PYTHON_EXE).parent / "Lib" / "site-packages"
+        dll_paths = [Path(PYTHON_EXE).parent, site_packages / "torch" / "lib", site_packages / "cv2"]
+        for p in dll_paths:
+            if p.exists():
+                try: os.add_dll_directory(str(p))
+                except: pass
+    
+    # Check for GPU and export to env
+    has_gpu = False
+    try:
+        # Simple check for nvidia-smi
+        rc, out, err = run_command(["nvidia-smi"])
+        if rc == 0: has_gpu = True
+    except: pass
+    os.environ["HAS_NVIDIA_GPU"] = str(has_gpu)
+    
     logger.info(f"[*] Targeting Verified Python: {PYTHON_EXE}")
     
     # Phase 0: Source Recovery (Standalone Bootstrapper)
