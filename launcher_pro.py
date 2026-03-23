@@ -294,15 +294,25 @@ def recover_source_code():
             if extracted_dirs:
                 root_src = extracted_dirs[0]
                 logger.info(f"[*] Moving files from {root_src.name} to application root...")
+                running_exe_name = EXE_PATH.name
+                
                 for item in root_src.iterdir():
+                    # CRITICAL: Do NOT attempt to overwrite the running EXE (WinError 5)
+                    if item.name == running_exe_name:
+                        logger.info(f"    [SKIP] Protected file (active): {item.name}")
+                        continue
+                        
                     dest = APP_DIR / item.name
-                    if dest.exists():
-                        if dest.is_dir(): shutil.rmtree(dest)
-                        else: os.remove(dest)
-                    shutil.move(str(item), str(dest))
+                    try:
+                        if dest.exists():
+                            if dest.is_dir(): shutil.rmtree(dest)
+                            else: os.remove(dest)
+                        shutil.move(str(item), str(dest))
+                    except Exception as move_err:
+                        logger.warning(f"    [WARN] Could not move {item.name}: {move_err}")
                 
                 # Cleanup
-                shutil.rmtree(root_src)
+                shutil.rmtree(root_src, ignore_errors=True)
                 if zip_tmp.exists(): os.remove(zip_tmp)
                 
                 logger.info("[SUCCESS] Application source code recovered.")
