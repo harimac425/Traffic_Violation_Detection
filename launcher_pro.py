@@ -164,7 +164,7 @@ def get_python_path():
     logger.warning("[!] No compatible Python 3.10 installation found on this system.")
     return None
 
-PYTHON_EXE = get_python_path()
+PYTHON_EXE = None
 
 def run_command(cmd, wait=True, stream=False, use_system_python=False):
     """Safely runs a command and returns the exit code and output."""
@@ -209,7 +209,6 @@ def check_python():
         return False
     
     return False
-捉
 
 def check_gpu():
     """Checks if a compatible NVIDIA GPU is available."""
@@ -561,6 +560,8 @@ def main():
     
     # Check if we even found a Python interpreter
     global PYTHON_EXE
+    PYTHON_EXE = get_python_path()
+    
     if not PYTHON_EXE:
         # If no Python found, try portable install first (User wanted auto-setup)
         if install_portable_python():
