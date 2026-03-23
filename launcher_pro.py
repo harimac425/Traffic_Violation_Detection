@@ -161,55 +161,7 @@ def get_python_path():
         except:
             continue
 
-    logger.warning("[!] No Python 3.10 installation found. The app requires 3.10 for stability.")
-    
-    # Second pass: Fallback to any working python but warn
-    for p in visited_paths:
-        # CRITICAL: Skip if it's the EXE itself (recursion protection)
-        if IS_FROZEN and str(EXE_PATH).lower() in p.lower():
-            continue
-            
-        # Skip Windows Store stubs (WindowsApps)
-        if "windowsapps" in p.lower():
-            continue
-            
-        # SANITY CHECK - Does it actually work?
-        try:
-            test = subprocess.run([p, "-c", "import sys; print('ready')"], capture_output=True, text=True, timeout=2, check=False)
-            if test.returncode == 0 and "ready" in test.stdout:
-                logger.warning(f"    [FALLBACK] Using alternate version: {p}")
-                return p
-        except:
-            continue
-
-    # 4. Last ditch: If not frozen, use current
-    if not IS_FROZEN:
-        return sys.executable
-        
-    # 5. Filter for STABLE versions only (Ignore 3.13, 3.14+ for AI apps)
-    logger.info("[*] Filtering for compatible AI environments (3.10 to 3.12)...")
-    stable_paths = []
-    for p in visited_paths:
-        try:
-            v_check = subprocess.run([p, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], 
-                                   capture_output=True, text=True, timeout=2, check=False)
-            if v_check.returncode == 0:
-                v_str = v_check.stdout.strip()
-                if v_str in ["3.10", "3.11", "3.12"]:
-                    stable_paths.append(p)
-                    logger.info(f"    [MATCH] Found stable {v_str}: {p}")
-        except:
-            continue
-            
-    if stable_paths:
-        return stable_paths[0] # Prefer the first stable one found
-    
-    # If NO stable versions found, but we have ANY python, warn the user
-    if potential_interpreters:
-        best_bad_bet = potential_interpreters[0]
-        logger.warning(f"[!] No stable versions (3.10-3.12) found. Using best available: {best_bad_bet}")
-        return best_bad_bet
-
+    logger.warning("[!] No compatible Python 3.10 installation found on this system.")
     return None
 
 PYTHON_EXE = get_python_path()
