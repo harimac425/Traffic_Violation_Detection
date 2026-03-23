@@ -55,23 +55,19 @@ def check_compatibility():
         for m in missing:
             print(f"  - {m}")
         
-        print("\n  [!] SELF-HEAL: Would you like to attempt automatic installation? (y/n): ", end="")
-        choice = input().lower().strip()
-        if choice == 'y':
-            print("\n[*] Starting emergency installation...")
-            import subprocess
-            try:
-                subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
-                print("\n[SUCCESS] Installation complete! Please restart the app.")
-            except Exception as e:
-                print(f"\n[ERROR] Auto-install failed: {e}")
-                print("  FIX: Run 'install_python_310.bat' to install the verified environment.")
-            
-        print("\n  Press Enter to close...")
-        input()
-        sys.exit(1)
+        print("\n  [!] SELF-HEAL: Attempting automatic installation...")
+        import subprocess
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+            print("\n[SUCCESS] Installation complete! Restarting app...")
+            return True
+        except Exception as e:
+            print(f"\n[ERROR] Auto-install failed: {e}")
+            print("  FIX: Run 'install_python_310.bat' to install the verified environment.")
+            sys.exit(1)
         
     print("\n[*] Environment verified. Launching System...\n")
+    return True
 
 if __name__ == "__main__":
     check_compatibility()

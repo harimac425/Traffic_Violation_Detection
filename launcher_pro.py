@@ -303,6 +303,29 @@ def check_pip():
     logger.warning("[!] PIP is missing or broken in the current environment.")
     return False
 
+def reconstruct_pth_file():
+    """Forces the .pth file to include all necessary search paths for the portable environment."""
+    pth_file = PYTHON_ENV_DIR / "python310._pth"
+    logger.info(f"[*] Reconstructing {pth_file.name} for deep compatibility...")
+    
+    # Standard paths for an embeddable python + our customizations
+    content = [
+        "python310.zip",
+        ".",
+        "Lib/site-packages",
+        "import site" # CRITICAL for enabling site-packages logic
+    ]
+    
+    try:
+        with open(pth_file, 'w') as f:
+            for line in content:
+                f.write(line + "\n")
+        logger.info("[SUCCESS] .pth file reconstructed.")
+        return True
+    except Exception as e:
+        logger.error(f"[ERROR] .pth reconstruction failed: {e}")
+        return False
+
 def bootstrap_pip():
     """Installs PIP and configures the portable environment's .pth file."""
     logger.info("[*] Bootstrapping PIP for portable environment...")
@@ -364,10 +387,11 @@ def install_portable_python():
             
             # Step 2: Bootstrap PIP
             if bootstrap_pip():
-                logger.info("[SUCCESS] Portable Python 3.10.11 is ready.")
-                global PYTHON_EXE
-                PYTHON_EXE = str(LOCAL_PYTHON_EXE)
-                return True
+                if reconstruct_pth_file():
+                    logger.info("[SUCCESS] Portable Python 3.10.11 is fully ready.")
+                    global PYTHON_EXE
+                    PYTHON_EXE = str(LOCAL_PYTHON_EXE)
+                    return True
         except Exception as e:
             logger.error(f"[ERROR] Portable setup failed: {e}")
     return False
@@ -462,9 +486,18 @@ def install_dependencies():
     """Force-installs all required dependencies from requirements.txt."""
     # Ensure PIP is available first
     if not check_pip():
-        if not bootstrap_pip():
-            logger.error("[FATAL] Could not bootstrap PIP. Manual intervention required.")
-            return False
+        logger.info("[!] Attempting environment link repair (.pth)...")
+        reconstruct_pth_file()
+        if not check_pip():
+            logger.info("[!] PIP still missing. Attempting emergency bootstrap...")
+            if not bootstrap_pip():
+                logger.error("[FATAL] Could not bootstrap PIP. Manual intervention required.")
+                return False
+            # Re-verify after bootstrap
+            reconstruct_pth_file()
+            if not check_pip():
+                logger.error("[FATAL] PIP bootstrapping failed to link correctly.")
+                return False
             
     logger.info("[*] Syncing application dependencies... (this may take a minute)")
     logger.info("[INFO] DETAILED INSTALL LOGS WILL BE SHOWN BELOW:")
@@ -475,8 +508,11 @@ def install_dependencies():
         logger.info("[OK] Dependencies synchronized.")
         return True
     else:
-        logger.warning(f"[!] Warning during dependency sync: {err}")
-        return True # Continue anyway, app might still work
+        logger.error(f"[ERROR] Dependency synchronization failed: {err}")
+        # If it failed, try one last ditch effort: Reconstruct the .pth file and check pip
+        logger.info("[*] Attempting .pth reconstruction as a last-resort fix...")
+        reconstruct_pth_file()
+        return False
 
 # --- Start Sequence ---
 
