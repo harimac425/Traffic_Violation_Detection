@@ -167,7 +167,12 @@ def get_python_path():
 PYTHON_EXE = None
 
 def run_command(cmd, wait=True, stream=False, use_system_python=False):
-    """Safely runs a command and returns the exit code and output."""
+    """Safely runs a command with full environment isolation."""
+    # Create isolated environment (Scrub PyInstaller/Host variables)
+    env = os.environ.copy()
+    for var in ['PYTHONPATH', 'PYTHONHOME', 'PYTHONEXECUTABLE', 'PYTHONNOUSERSITE']:
+        env.pop(var, None)
+    
     if use_system_python and cmd[0] == sys.executable:
         cmd[0] = PYTHON_EXE
         
@@ -175,13 +180,13 @@ def run_command(cmd, wait=True, stream=False, use_system_python=False):
         if wait:
             if stream:
                 # Direct piping to console for real-time progress (pip install etc)
-                result = subprocess.run(cmd, check=False)
+                result = subprocess.run(cmd, check=False, env=env)
                 return result.returncode, "", ""
             else:
-                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
                 return result.returncode, result.stdout, result.stderr
         else:
-            subprocess.Popen(cmd)
+            subprocess.Popen(cmd, env=env)
             return 0, "", ""
     except Exception as e:
         return -1, "", str(e)
@@ -366,6 +371,17 @@ def bootstrap_pip():
             return True
     return False
 
+def force_wipe_portable_env():
+    """Wipes the portable environment if it's corrupted beyond repair."""
+    logger.warning("[!] CORRUPTION DETECTED: Wiping portable environment for fresh start...")
+    try:
+        if PYTHON_ENV_DIR.exists():
+            shutil.rmtree(PYTHON_ENV_DIR, ignore_errors=True)
+        return True
+    except Exception as e:
+        logger.error(f"[ERROR] Wipe failed: {e}")
+        return False
+
 def install_portable_python():
     """Downloads and sets up a standalone Python 3.10.11 environment."""
     url = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip"
@@ -491,7 +507,11 @@ def install_dependencies():
         if not check_pip():
             logger.info("[!] PIP still missing. Attempting emergency bootstrap...")
             if not bootstrap_pip():
-                logger.error("[FATAL] Could not bootstrap PIP. Manual intervention required.")
+                logger.error("[FATAL] Could not bootstrap PIP. Trying force-wipe recovery...")
+                force_wipe_portable_env()
+                if install_portable_python():
+                    # Retry once after fresh install
+                    if check_pip(): return install_dependencies()
                 return False
             # Re-verify after bootstrap
             reconstruct_pth_file()
@@ -524,6 +544,11 @@ def launch_application():
 
     logger.info("[*] Handing control to Main Application...")
     
+    # Create isolated environment 
+    env = os.environ.copy()
+    for var in ['PYTHONPATH', 'PYTHONHOME', 'PYTHONEXECUTABLE', 'PYTHONNOUSERSITE']:
+        env.pop(var, None)
+        
     # We run in a managed subprocess so we can catch WinError 1114
     try:
         process = subprocess.Popen(
@@ -531,6 +556,7 @@ def launch_application():
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=env,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' and False else 0 
         )
         

@@ -55,10 +55,14 @@ def check_compatibility():
         for m in missing:
             print(f"  - {m}")
         
-        print("\n  [!] SELF-HEAL: Attempting automatic installation...")
-        import subprocess
+        import subprocess, os
         try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
+            # Isolated environment
+            env = os.environ.copy()
+            for var in ['PYTHONPATH', 'PYTHONHOME', 'PYTHONEXECUTABLE', 'PYTHONNOUSERSITE']:
+                env.pop(var, None)
+            
+            subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], check=True, env=env)
             print("\n[SUCCESS] Installation complete! Restarting app...")
             return True
         except Exception as e:
