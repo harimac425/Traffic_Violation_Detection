@@ -447,15 +447,50 @@ def verify_models():
     logger.info("[OK] All required AI models cataloged.")
     return True
 
+def check_vc_runtime():
+    """Checks for the presence of the Microsoft VC++ 2015-2022 Redistributable."""
+    system32 = Path(os.environ.get('SYSTEMROOT', 'C:\\Windows')) / 'System32'
+    dlls = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll']
+    missing = [dll for dll in dlls if not (system32 / dll).exists()]
+    if not missing:
+        return True
+    logger.warning(f"[!] Missing Microsoft VC++ Runtime components: {', '.join(missing)}")
+    return False
+
+def install_vc_runtime():
+    """Silently installs the Microsoft VC++ 2015-2022 Redistributable using winget."""
+    logger.info("[*] Attempting autonomous VC++ Redistributable installation...")
+    # winget install Microsoft.VCRedist.2015+.x64 --silent --accept-package-agreements --accept-source-agreements
+    rc, out, err = run_command([
+        "winget", "install", "Microsoft.VCRedist.2015+.x64", 
+        "--silent", "--accept-package-agreements", "--accept-source-agreements"
+    ], stream=True)
+    if rc == 0:
+        logger.info("[SUCCESS] VC++ Redistributable installed.")
+        return True
+    logger.error(f"[ERROR] VC++ installation failed: {err}")
+    return False
+
 # --- Self-Healing ---
 
 def repair_torch(cpu_only=True):
     """Automatically repairs the AI engine if it's broken or incompatible."""
     logger.info(f"[*] REPAIR INITIATED: Reinstalling PyTorch engine (CPU-Only: {cpu_only})...")
     
-    # 1. Uninstall broken versions
-    logger.info("[*] Removing existing PyTorch files...")
+    # Check VC++ Runtime first, as it's the common cause of WinError 1114
+    if not check_vc_runtime():
+        install_vc_runtime()
+    
+    # 1. Uninstall broken versions and DEEP WIPE site-packages/torch
+    logger.info("[*] Removing existing PyTorch files and performing deep wipe...")
     run_command([PYTHON_EXE, "-m", "pip", "uninstall", "torch", "torchvision", "torchaudio", "-y"])
+    
+    site_packages = Path(PYTHON_EXE).parent / "Lib" / "site-packages"
+    for folder in ["torch", "torchvision", "torchaudio"]:
+        target = site_packages / folder
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+            logger.info(f"    [CLEANED] {folder}")
     
     # 2. Reinstall correct version
     if cpu_only:
@@ -471,6 +506,9 @@ def repair_torch(cpu_only=True):
             PYTHON_EXE, "-m", "pip", "install", 
             "torch", "torchvision", "torchaudio"
         ], stream=True)
+    
+    # Final check: Force DLL registration
+    reconstruct_pth_file()
     
     if rc == 0:
         logger.info("[SUCCESS] AI Engine repaired.")
@@ -665,6 +703,10 @@ def main():
     except: pass
     os.environ["HAS_NVIDIA_GPU"] = str(has_gpu)
     
+    # Proactive VC++ Runtime check (Crucial for Zero-Drag)
+    if not check_vc_runtime():
+        install_vc_runtime()
+        
     logger.info(f"[*] Targeting Verified Python: {PYTHON_EXE}")
     
     # Phase 0: Source Recovery (Standalone Bootstrapper)
