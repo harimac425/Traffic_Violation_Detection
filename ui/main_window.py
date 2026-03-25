@@ -460,16 +460,13 @@ class DetectionThread(QThread):
                                 if crop.size > 0:
                                     # --- HELMET CHECK ---
                                     if needs_helmet and config.ENABLED_VIOLATIONS.get("NO_HELMET", True):
-                                        print(f"DEBUG: Calling LLM for Helmet-ID {det.track_id}...")
-                                        is_wearing, reasoning = self.llm_provider.verify_helmet(crop)
-                                        print(f"DEBUG: LLM Response for Helmet {det.track_id}: {is_wearing} - '{reasoning}'")
                                         if self.llm_rate_limiter.can_request():
                                             logger.info(f"AI Action: Requesting Helmet Verification for ID {det.track_id}")
                                             is_wearing, reasoning = self.llm_provider.verify_helmet(crop)
                                             logger.info(f"AI Reaction: LLM says ID {det.track_id} is wearing helmet: {is_wearing} ({reasoning})")
                                             
                                             if not is_wearing:
-                                                # Delete YOLO boxes & Force violation
+                                                # Delete valid helmet boxes & Force NO_HELMET violation
                                                 if "helmets" in detections:
                                                     riders = [d for d in main_dets if d.track_id is not None and 
                                                              d.class_name == "person" and 
@@ -486,8 +483,10 @@ class DetectionThread(QThread):
                                                     )
                                                     new_v.llm_verified = True; new_v.llm_reasoning = reasoning
                                                     violations.append(new_v)
-                                        else:
-                                            violations = [v for v in violations if not (v.track_id == det.track_id and v.type == "NO_HELMET")]
+                                            else:
+                                                # If LLM confirms they ARE wearing a helmet, drop any false-positive YOLO NO_HELMET violations
+                                                violations = [v for v in violations if not (v.track_id == det.track_id and v.type == "NO_HELMET")]
+                                        # If rate limited, we do nothing and let the YOLO base heuristic stand (No else block dropping them!)
 
                                     # --- EXCESS RIDING CHECK (SMART VOTING) ---
                                     if needs_triple and config.ENABLED_VIOLATIONS.get("TRIPLE_RIDING", True):
@@ -601,10 +600,15 @@ class DetectionThread(QThread):
 
                 
                 # Map violations to vehicle_info
-                violation_map = {v.track_id: v.type for v in violations if v.track_id is not None}
+                from collections import defaultdict
+                violation_map = defaultdict(list)
+                for v in violations:
+                    if v.track_id is not None and v.type not in violation_map[v.track_id]:
+                        violation_map[v.track_id].append(v.type)
+                        
                 for v_info in vehicle_info:
                     if v_info["id"] in violation_map:
-                        v_info["violation"] = violation_map[v_info["id"]]
+                        v_info["violation"] = ", ".join(violation_map[v_info["id"]])
                 
                 # Emit results
                 self.frame_ready.emit(frame, detections, violations, vehicle_info)

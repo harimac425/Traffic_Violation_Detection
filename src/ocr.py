@@ -162,7 +162,7 @@ class PlateOCR:
         
         # Format with spaces
         if len(corrected) >= 10:
-            return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:]}"
+            return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:10]}"
         
         return corrected
     
@@ -392,7 +392,7 @@ class TrOCRPlateReader:
                 else:
                     corrected += char
         if len(corrected) >= 10:
-            return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:]}"
+            return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:10]}"
         return corrected
     
     def validate_indian_plate(self, text: str) -> bool:
@@ -517,7 +517,7 @@ class PaddleOCREngine:
             elif i < 4: corrected += self.char_map.get(char, char) if char.isalpha() else char
             elif i < 6: corrected += char
             else: corrected += self.char_map.get(char, char) if char.isalpha() else char
-        if len(corrected) >= 10: return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:]}"
+        if len(corrected) >= 10: return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:10]}"
         return corrected
         
 def validate_indian_plate(text: str) -> bool:
