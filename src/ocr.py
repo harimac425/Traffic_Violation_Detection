@@ -129,41 +129,33 @@ class PlateOCR:
     
     def format_indian_plate(self, text: str) -> str:
         """
-        Format text as Indian license plate.
-        Format: SS DD AA DDDD (State, District, Series, Number)
-        Example: KA 01 AB 1234
+        Format text as Indian license plate using smart regex parsing.
         """
         if not text or len(text) < 9:
             return text
+            
+        text = text.replace(" ", "").upper()
         
-        # Remove spaces
-        text = text.replace(" ", "")
-        
-        # Apply character corrections based on position
         corrected = ""
         for i, char in enumerate(text):
-            if i < 2:  # State code - letters
-                if char in '01':
-                    corrected += 'O' if char == '0' else 'I'
-                else:
-                    corrected += char
-            elif i < 4:  # District - numbers
-                if char in self.char_map and char.isalpha():
-                    corrected += self.char_map[char]
-                else:
-                    corrected += char
-            elif i < 6:  # Series - letters
+            if i < 2:  # State code usually letters
+                corrected += 'O' if char == '0' else ('1' if char in 'IJ' else char)
+            elif i < 4:  # District usually numbers
+                corrected += self.char_map.get(char, char) if char.isalpha() else char
+            else:
                 corrected += char
-            else:  # Number - digits
-                if char in self.char_map and char.isalpha():
-                    corrected += self.char_map[char]
-                else:
-                    corrected += char
+                
+        import re
+        match = re.match(r'^([A-Z]{2})([0-9]{2})([A-Z]{1,3})([0-9A-Z]{1,4})', corrected)
         
-        # Format with spaces
-        if len(corrected) >= 10:
-            return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:10]}"
-        
+        if match:
+            state, dist, series, num = match.groups()
+            cleaned_num = ""
+            for char in num:
+                cleaned_num += self.char_map.get(char, char) if char.isalpha() else char
+            cleaned_num = cleaned_num[:4]
+            return f"{state} {dist} {series} {cleaned_num}"
+            
         return corrected
     
     def validate_indian_plate(self, text: str) -> bool:
@@ -368,31 +360,29 @@ class TrOCRPlateReader:
         return text
     
     def format_indian_plate(self, text: str) -> str:
-        """Format text as Indian license plate (delegates to same logic as EasyOCR)"""
+        """Format text as Indian license plate (smart regex)"""
         if not text or len(text) < 9:
             return text
-        text = text.replace(" ", "")
+        text = text.replace(" ", "").upper()
+        
         corrected = ""
         for i, char in enumerate(text):
             if i < 2:
-                if char in '01':
-                    corrected += 'O' if char == '0' else 'I'
-                else:
-                    corrected += char
+                corrected += 'O' if char == '0' else ('1' if char in 'IJ' else char)
             elif i < 4:
-                if char in self.char_map and char.isalpha():
-                    corrected += self.char_map[char]
-                else:
-                    corrected += char
-            elif i < 6:
-                corrected += char
+                corrected += self.char_map.get(char, char) if char.isalpha() else char
             else:
-                if char in self.char_map and char.isalpha():
-                    corrected += self.char_map[char]
-                else:
-                    corrected += char
-        if len(corrected) >= 10:
-            return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:10]}"
+                corrected += char
+                
+        import re
+        match = re.match(r'^([A-Z]{2})([0-9]{2})([A-Z]{1,3})([0-9A-Z]{1,4})', corrected)
+        if match:
+            state, dist, series, num = match.groups()
+            cleaned_num = ""
+            for char in num:
+                cleaned_num += self.char_map.get(char, char) if char.isalpha() else char
+            return f"{state} {dist} {series} {cleaned_num[:4]}"
+            
         return corrected
     
     def validate_indian_plate(self, text: str) -> bool:
@@ -510,14 +500,19 @@ class PaddleOCREngine:
         
     def format_indian_plate(self, text: str) -> str:
         if not text or len(text) < 9: return text
-        text = text.replace(" ", "")
+        text = text.replace(" ", "").upper()
         corrected = ""
         for i, char in enumerate(text):
             if i < 2: corrected += 'O' if char == '0' else ('1' if char in 'IJ' else char)
             elif i < 4: corrected += self.char_map.get(char, char) if char.isalpha() else char
-            elif i < 6: corrected += char
-            else: corrected += self.char_map.get(char, char) if char.isalpha() else char
-        if len(corrected) >= 10: return f"{corrected[:2]} {corrected[2:4]} {corrected[4:6]} {corrected[6:10]}"
+            else: corrected += char
+            
+        import re
+        match = re.match(r'^([A-Z]{2})([0-9]{2})([A-Z]{1,3})([0-9A-Z]{1,4})', corrected)
+        if match:
+            state, dist, series, num = match.groups()
+            cleaned_num = "".join(self.char_map.get(c, c) if c.isalpha() else c for c in num)
+            return f"{state} {dist} {series} {cleaned_num[:4]}"
         return corrected
         
 def validate_indian_plate(text: str) -> bool:
