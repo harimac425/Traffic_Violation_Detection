@@ -360,9 +360,7 @@ class DetectionThread(QThread):
                         # --- NEW: GHOST TRACKING (If detector missed this frame) ---
                         if not any(boxes_overlap(det.box, p.box, threshold=0.01) for p in plate_dets):
                             if det.track_id in self.plate_relative_offsets:
-                                self.plate_ghost_count[det.track_id] += 1
-                                if self.plate_ghost_count[det.track_id] < 3: # Reduced persistence window
-                                    # Recalculate plate box from vehicle position
+                                if self.plate_ghost_count[det.track_id] < 15: # Increased persistence window for smoother highlighting
                                     v_box = det.box
                                     v_w = v_box[2] - v_box[0]
                                     v_h = v_box[3] - v_box[1]
@@ -1496,15 +1494,8 @@ class MainWindow(QMainWindow):
         self.device_status.setToolTip(f"Active Device: {device_name}")
         if "GPU" in device_name:
             self.device_status.setText("🚀")
-            self.device_status.setStyleSheet("color: #10B981; font-weight: 700;") # Green
-        elif getattr(config, 'HAS_NVIDIA_HARDWARE', False):
-            # Hardware detected but not used by Torch
-            self.device_status.setText("⚠️")
-            self.device_status.setStyleSheet("color: #FACC15; font-weight: 700;") # Warning Yellow
-            self.device_status.setToolTip("NVIDIA Hardware found, but GPU Engine not installed. Run 'fix_gpu.bat'.")
         else:
             self.device_status.setText("🟢")
-            self.device_status.setStyleSheet("color: #CBD5E1; font-weight: 700;") # Gray
     
     def add_violation_to_log(self, violation: Violation):
         """Add a violation to the log list"""
