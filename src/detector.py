@@ -178,7 +178,10 @@ class MultiModelDetector:
             main_detections = others + persons
             results["main"] = main_detections
 
-        # --- Cascade Detection for Helmets ---
+        # --- Cascade Detection for Helmets (ABSENCE-BASED) ---
+        # Strategy: Run the helmet model on each rider. If a confident "helmet/with_helmet"
+        # detection overlaps the rider's head → Helmet. If NO such detection exists → No Helmet.
+        # This is far more reliable than trusting the model's "no_helmet" class output.
         if self.helmet_model is not None:
             persons = [d for d in main_detections if d.class_name == "person"]
             motorcycles = [d for d in main_detections if d.class_name == "motorcycle"]
@@ -186,20 +189,14 @@ class MultiModelDetector:
             if persons:
                 for person in persons:
                     # --- HIGH PRECISION RIDER IDENTIFICATION ---
-                    # Only consider person a rider if they overlap significantly with a motorcycle
                     is_rider = any(self._boxes_overlap(person.box, moto.box, threshold=0.15) for moto in motorcycles)
                     
-                    # Also check if the person box is "contained" or sitting on top of the motorcycle
-                    # (Precision enhancement from aneesarom logic)
                     if not is_rider:
-                        # Fallback: Check if person center is near motorcycle upper region
                         px_mid = (person.box[0] + person.box[2]) / 2
-                        py_mid = (person.box[1] + person.box[3]) / 2
                         for moto in motorcycles:
-                            # If person is in the top-half vicinity of motorcycle center
                             moto_w = moto.box[2] - moto.box[0]
                             dist_x = abs(px_mid - (moto.box[0] + moto.box[2])/2)
-                            dist_y = abs(person.box[3] - moto.box[1]) # feet near moto top
+                            dist_y = abs(person.box[3] - moto.box[1])
                             if dist_x < moto_w * 0.4 and dist_y < moto_w * 0.3:
                                 is_rider = True
                                 break
@@ -220,23 +217,51 @@ class MultiModelDetector:
                         confidence=config.HELMET_CONFIDENCE
                     )
                     
+                    # --- ABSENCE-BASED LOGIC ---
+                    # Get the rider's head region (top 30% of person box)
+                    head_box = list(self._get_head_region(person.box))
+                    
+                    # Check if ANY model detection is a positive helmet in the head region
+                    found_helmet = False
+                    best_helmet_det = None
+                    
                     for d in crop_detections:
                         dx1, dy1, dx2, dy2 = d.box
                         absolute_box = [x1 + dx1, y1 + dy1, x1 + dx2, y1 + dy2]
                         
-                        # --- SPATIAL CONTAINMENT CHECK ---
-                        # Ensure helmet is actually in the upper region of the person
-                        # (This is the "aneesarom" high-precision containment rule)
                         containment = calculate_containment(absolute_box, person.box)
-                        if containment < 0.6: continue # Must be at least 60% inside person box
+                        if containment < 0.6: continue
                         
-                        d.box = absolute_box
-                        # Clean label for UI (Robust string matching)
                         c_name = d.class_name.lower().strip()
-                        is_no_helmet = ("without" in c_name or "no" in c_name or "no_helmet" in c_name)
-                        d.class_name = "No Helmet" if is_no_helmet else "Helmet"
-                        d.track_id = person.track_id # Associate with person's track ID
-                        results["helmets"].append(d)
+                        # A POSITIVE helmet detection = model says "with helmet" / class_id=0
+                        is_positive_helmet = ("without" not in c_name and "no" not in c_name and d.class_id == 0)
+                        
+                        if is_positive_helmet and d.confidence >= 0.6:
+                            # Check if this helmet detection actually overlaps the HEAD region
+                            head_overlap = calculate_iou(absolute_box, head_box)
+                            if head_overlap > 0.05:
+                                found_helmet = True
+                                best_helmet_det = d
+                                best_helmet_det.box = absolute_box
+                                break
+                    
+                    # --- DECISION ---
+                    if found_helmet and best_helmet_det:
+                        # Confirmed helmet on head
+                        best_helmet_det.class_name = "Helmet"
+                        best_helmet_det.track_id = person.track_id
+                        results["helmets"].append(best_helmet_det)
+                    else:
+                        # NO helmet found on this rider's head → Flag as No Helmet
+                        no_helmet_det = Detection(
+                            box=head_box,
+                            class_id=1,
+                            class_name="No Helmet",
+                            confidence=0.95,
+                            track_id=person.track_id,
+                            source_model="helmet"
+                        )
+                        results["helmets"].append(no_helmet_det)
 
         # --- Plate Detection (Cascade on Vehicle Crops) ---
         if self.plate_model is not None:
