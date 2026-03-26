@@ -217,18 +217,29 @@ class MultiModelDetector:
                         confidence=config.HELMET_CONFIDENCE
                     )
                     
-                    # --- ABSENCE-BASED LOGIC ---
-                    # The helmet model (helmet_yolov8n.pt) ALWAYS outputs class_id=0 "With helmet"
-                    # regardless of whether a helmet is visible. It cannot distinguish helmet from no-helmet.
-                    # Therefore: Flag ALL riders as "No Helmet" and let the violations pipeline's 
-                    # LLM verification (main_window.py line ~462) confirm or override.
-                    head_box = list(self._get_head_region(person.box))
+                    # --- ABSENCE-BASED LOGIC (Using Model's Head Geometry) ---
+                    # The helmet model ALWAYS outputs class_id=0 "With helmet" regardless of reality.
+                    # However, its bounding box accurately surrounds the HEAD.
+                    # Instead of mathematical guessing, we take the model's tight head bounding box
+                    # and forcefully label it as "No Helmet". LLM verification will override false positives.
+                    best_head_box = None
+                    best_conf = 0
+                    
+                    for d in crop_detections:
+                        if getattr(d, 'confidence', d.confidence) > best_conf:
+                            best_conf = d.confidence
+                            dx1, dy1, dx2, dy2 = d.box
+                            best_head_box = [x1 + dx1, y1 + dy1, x1 + dx2, y1 + dy2]
+                            
+                    # Fallback to math box if the model failed to detect the head entirely
+                    if not best_head_box:
+                        best_head_box = list(self._get_head_region(person.box))
                     
                     no_helmet_det = Detection(
-                        box=head_box,
+                        box=best_head_box,
                         class_id=1,
                         class_name="No Helmet",
-                        confidence=0.90,
+                        confidence=best_conf if best_conf > 0 else 0.90,
                         track_id=person.track_id,
                         source_model="helmet"
                     )

@@ -1401,7 +1401,14 @@ class MainWindow(QMainWindow):
             self.vehicle_table.setItem(i, 2, plate_item)
             
             # Violation Column (String) & Red Background
-            violation_text = v['violation']
+            # Combine current frame violations with persistent active violations
+            current_violations = v['violation'].split(', ') if v['violation'] else []
+            active_types = [av["type"] for av in self.active_violations if av["track_id"] == v['id']]
+            
+            all_v_types = list(set(current_violations + active_types))
+            all_v_types = [vt for vt in all_v_types if vt]
+            violation_text = ", ".join(all_v_types)
+            
             violation_item = QTableWidgetItem(violation_text)
             self.vehicle_table.setItem(i, 3, violation_item)
             
