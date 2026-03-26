@@ -108,30 +108,42 @@ def boxes_overlap(box1: List[float], box2: List[float], threshold: float = 0.3) 
 def is_person_on_motorcycle(person_box: List[float], motorcycle_box: List[float]) -> bool:
     """
     Robust proximity heuristic to associate riders/passengers with a motorcycle.
-    Uses IoU, horizontal alignment, and vertical adjacency.
+    Uses IoU, containment, and biologically accurate vertical/horizontal alignment.
     """
-    # 1. Base case: IoU (Simple overlap)
     iou = calculate_iou(person_box, motorcycle_box)
-    if iou > 0.05: return True
     
-    # 2. Geometry: Is the person sitting on/above the motorcycle?
+    # 1. Base case: Relaxed overlap for partial person detections
+    if iou > 0.10: return True
+    
+    # 2. Containment (One fully occludes the other)
+    person_area_in_bike = calculate_containment(person_box, motorcycle_box)
+    bike_area_in_person = calculate_containment(motorcycle_box, person_box)
+    
+    if person_area_in_bike > 0.35 or bike_area_in_person > 0.35:
+        return True
+        
+    # 3. Structural Geometry
     px_mid = (person_box[0] + person_box[2]) / 2
     mx_mid = (motorcycle_box[0] + motorcycle_box[2]) / 2
+    my_mid = (motorcycle_box[1] + motorcycle_box[3]) / 2
+    
     mw = motorcycle_box[2] - motorcycle_box[0]
     mh = motorcycle_box[3] - motorcycle_box[1]
     
-    # Horizontal alignment (Person should be roughly centered over bike)
-    h_dist = abs(px_mid - mx_mid)
-    is_h_aligned = h_dist < (mw * 0.4) # Within 40% of bike width from center
+    # Horizontal: Rider's center is within the wide boundary of the bike
+    is_h_aligned = abs(px_mid - mx_mid) < (mw * 0.6)
     
-    # Vertical adjacency (Person's bottom should be near bike's top)
-    py2 = person_box[3]
-    my1 = motorcycle_box[1]
-    v_dist = abs(py2 - my1)
-    is_v_aligned = v_dist < (mh * 0.3) # Within 30% of bike height from top
+    py1, py2 = person_box[1], person_box[3]
+    my1, my2 = motorcycle_box[1], motorcycle_box[3]
     
-    # Combined heuristic: High alignment even with zero IoU (common for passengers)
-    return is_h_aligned and is_v_aligned
+    # Vertical: Rider's head (y1) MUST be above the bike's midpoint, ensuring they aren't crouching below
+    is_head_above_seat = py1 < my_mid
+    
+    # Vertical: Rider's feet (y2) must not be floating incredibly high, nor buried deep below the ground line
+    are_feet_on_bike = (my1 - mh * 0.2) < py2 < (my2 + mh * 0.4)
+    
+    # Combined heuristic: High structural alignment + at least a tiny bit of physical overlap
+    return is_h_aligned and is_head_above_seat and are_feet_on_bike and iou > 0.02
 
 
 def get_upper_region(box: List[float], ratio: float = 0.4) -> List[float]:
@@ -175,7 +187,7 @@ def draw_detection(
     """Draw a detection box with label on the frame"""
     if llm_verified:
         color = (255, 255, 0) # Cyan (BGR)
-        label = f"✨ {label}"
+        label = f"AI: {label}"
         thickness += 1
     
     x1, y1, x2, y2 = map(int, box)
@@ -212,8 +224,8 @@ def draw_violation_alert(
     violation_type: str,
     llm_verified: bool = False
 ) -> np.ndarray:
-    """Draw a violation alert with red styling"""
-    return draw_detection(frame, box, f"⚠ {violation_type}", color=(0, 0, 255), thickness=3, llm_verified=llm_verified)
+    """Draw a violation alert with red styling (Emoji-free for OpenCV compatibility)"""
+    return draw_detection(frame, box, f"! {violation_type.upper()}", color=(0, 0, 255), thickness=3, llm_verified=llm_verified)
 
 
 def non_max_suppression(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> List[int]:

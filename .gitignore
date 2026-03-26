@@ -1,64 +1,26 @@
-# Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg
-*.egg-info/
-dist/
-!dist/TVDS.exe
+*$py.class
+python_env/
+app_source.zip
+Traffic_Violation_Detection-main/
+TVDS_old.exe
 build/
-.eggs/
-*.whl
-
-# Virtual environments
-venv/
-env/
-.env
-.venv/
-ENV/
-
-# IDEs
-.idea/
-.vscode/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# OS
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-.DS_Store
-$RECYCLE.BIN/
-
-# Project-specific — do NOT commit large model files or sensitive data
-models/*.pt
-*.pt
-*.pth
-*.onnx
-
-# Database and evidence data (user-generated)
-violations.db
+dist/
+*.spec
 evidence/
 logs/
 reports/
-
-# API keys / settings
-settings.json
+models/
 .env
-
-# Temp files
-*.tmp
-*.bak
+settings.json
+documentation/
+Lib/
+Scripts/
+share/
+include/
+aaa/
+*.db
 *.log
-C:/tmp/
-
-# Large media
-*.mp4
-*.avi
-*.mov
-*.mkv
+check_helmet_labels.py
+debug_gpu.py

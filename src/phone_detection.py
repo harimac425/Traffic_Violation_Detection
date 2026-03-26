@@ -66,17 +66,17 @@ class MediaPipePhoneDetector:
             from pathlib import Path
             
             # Model path
-            model_path = Path(__file__).parent.parent / "models" / "pose_landmarker_lite.task"
+            model_path = Path(__file__).parent.parent / "models" / "pose_landmarker_heavy.task"
             
             if not model_path.exists():
-                print("[PhoneDetection] Downloading pose landmark model...")
+                print("[PhoneDetection] Downloading heavy pose landmark model...")
                 import urllib.request
                 model_path.parent.mkdir(parents=True, exist_ok=True)
                 urllib.request.urlretrieve(
-                    'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task',
+                    'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task',
                     str(model_path)
                 )
-                print("[PhoneDetection] Model downloaded.")
+                print("[PhoneDetection] Heavy model downloaded.")
             
             options = PoseLandmarkerOptions(
                 base_options=BaseOptions(model_asset_path=str(model_path)),
@@ -251,27 +251,45 @@ class MediaPipePhoneDetector:
                 if is_person_on_motorcycle(person_bbox, moto_bbox):
                     on_motorcycle = True
                     break
-                
-                # Fallback to IoU if 1st heuristic fails (e.g. extreme angles)
-                iou = self._calculate_iou(person_bbox, moto_bbox)
-                if iou > 0.05:
-                    on_motorcycle = True
-                    break
             
             if not on_motorcycle:
                 continue
             
-            # Evidence 1: MediaPipe gesture
+            # Evidence 1: MediaPipe gesture (with CPU caching to prevent GPU starvation)
             pose_detected = False
             pose_confidence = 0.0
             pose_details = ""
             if self._available:
-                pose_detected, pose_confidence, pose_details = \
-                    self.detect_phone_gesture(frame, person_bbox)
+                import time
+                current_time = time.time()
+                
+                # Check cache for this tracked person
+                if not hasattr(self, '_pose_cache'):
+                    self._pose_cache = {}
+                    self._cache_duration = 0.5  # Cache gesture state for 0.5s (reduce CPU load by 93%)
+                    
+                if track_id is not None and track_id in self._pose_cache:
+                    cached_time, c_det, c_conf, c_det_str = self._pose_cache[track_id]
+                    if current_time - cached_time < self._cache_duration:
+                        # Re-use the cached skeletal gesture!
+                        pose_detected, pose_confidence, pose_details = c_det, c_conf, c_det_str
+                    else:
+                        # Cache expired, recompute
+                        pose_detected, pose_confidence, pose_details = \
+                            self.detect_phone_gesture(frame, person_bbox)
+                        self._pose_cache[track_id] = (current_time, pose_detected, pose_confidence, pose_details)
+                else:
+                    # Not in cache, compute now
+                    pose_detected, pose_confidence, pose_details = \
+                        self.detect_phone_gesture(frame, person_bbox)
+                    if track_id is not None:
+                        self._pose_cache[track_id] = (current_time, pose_detected, pose_confidence, pose_details)
             
             # Evidence 2: YOLO phone object near person (wider search)
             yolo_detected = False
             yolo_confidence = 0.0
+            phone_raised = False
+            
             for phone in phone_detections:
                 phone_bbox = phone.get('bbox', [0, 0, 0, 0])
                 phone_conf = phone.get('confidence', 0.0)
@@ -279,23 +297,34 @@ class MediaPipePhoneDetector:
                 if self._is_near(person_bbox, phone_bbox, margin=100):
                     yolo_detected = True
                     yolo_confidence = phone_conf
-                    break
+                    
+                    # Vertical Check: Is the phone held UP (near chest/head) rather than down in the lap?
+                    p_y1, p_y2 = person_bbox[1], person_bbox[3]
+                    p_height = p_y2 - p_y1
+                    phone_y_center = (phone_bbox[1] + phone_bbox[3]) / 2
+                    
+                    # Upper 60% of the body is chest/head area
+                    if phone_y_center < (p_y1 + p_height * 0.60):
+                        phone_raised = True
+                        break
             
-            # Determine violation
+            # Determine violation: User specifically requested "phone near ear/raised"
+            # Since MediaPipe fails on full-face helmets, we rely on the YOLO vertical fallback
+            if not pose_detected and not phone_raised:
+                continue  # Skip entirely if they don't have their hand raised AND YOLO doesn't see a raised phone
+                
             if pose_detected and yolo_detected:
                 method = "both"
                 confidence = max(pose_confidence, yolo_confidence)
-                details = f"Phone detected by pose ({pose_details}) AND YOLO"
+                details = f"Phone detected by pose ({pose_details}) AND YOLO near ear"
             elif pose_detected:
                 method = "pose"
                 confidence = pose_confidence
                 details = f"Calling gesture detected ({pose_details})"
-            elif yolo_detected:
+            elif phone_raised:
                 method = "yolo"
                 confidence = yolo_confidence
-                details = "Phone object detected near rider (YOLO)"
-            else:
-                continue  # No evidence
+                details = "Phone visually detected raised near head/chest (YOLO)"
             
             violations.append(PhoneViolation(
                 bbox=person_bbox,

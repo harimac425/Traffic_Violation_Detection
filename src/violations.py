@@ -108,7 +108,7 @@ class ViolationDetector:
         # Temporal Consistency Buffer (TCB)
         self.tcb = ViolationBuffer(
             window_size=getattr(config, 'TCB_WINDOW', 15),
-            threshold=getattr(config, 'TCB_THRESHOLD', 0.65)
+            threshold=getattr(config, 'TCB_THRESHOLD', 0.25) # Further relaxed for high-FPS stability
         )
 
     def reset(self):
@@ -196,7 +196,8 @@ class ViolationDetector:
                 
                 # Note: Without helmet model, this will flag all riders
                 # Set has_helmet = True to disable until model is added
-                if not has_helmet and helmets is not None:
+                # Violation if no helmet found near head
+                if not has_helmet:
                     violations.append(Violation(
                         type="NO_HELMET",
                         vehicle_box=motorcycle.box,
@@ -205,7 +206,6 @@ class ViolationDetector:
                         timestamp=time.time(),
                         details="Rider without helmet detected"
                     ))
-                    # self._set_cooldown(track_id, "NO_HELMET")
         
         return violations
     
@@ -573,14 +573,15 @@ class ViolationDetector:
         
         # Helmet detection - guarded by toggle
         if config.ENABLED_VIOLATIONS.get("NO_HELMET", True):
-            if use_helmet_model and (helmets or no_helmets):
-                # Use no_helmet detections directly as violations
+            if use_helmet_model:
+                # If model is active, use its detections (even if lists are empty)
                 all_violations.extend(self.check_no_helmet_with_model(
                     persons, motorcycles, helmets, no_helmets
                 ))
             else:
+                # Heuristic fallback (using YOLO11 person detection)
                 all_violations.extend(self.check_no_helmet(
-                    persons, motorcycles, helmets if helmets else None
+                    persons, motorcycles, helmets=None
                 ))
         
         # Missing plate detection - guarded by toggle
@@ -608,14 +609,25 @@ class ViolationDetector:
                 
                 # If detected in this frame, check if it's now reliable
                 if is_detected:
-                    if self.tcb.is_reliable(tid, v_type):
+                    # Phone usage is a highly fleeting detection. A cell phone will naturally flicker 
+                    # in and out of the AI's confidence threshold due to hand movement/occlusion. 
+                    # We drop the strict 65% consensus down to just 2 occurrences in the 15 frame window (13%).
+                    if v_type == "PHONE_USAGE":
+                        certainty = self.tcb.get_certainty(tid, v_type)
+                        reliable = len(self.tcb.history[(tid, v_type)]) >= 2 and certainty >= 0.10
+                    else:
+                        reliable = self.tcb.is_reliable(tid, v_type)
+                        
+                    if reliable:
                         if not self._is_on_cooldown(tid, v_type):
                             # Find the actual Violation object to include in final list
-                            # We use the most recent one detected
                             for v in all_violations:
                                 if v.track_id == tid and v.type == v_type:
                                     final_violations.append(v)
                                     self._set_cooldown(tid, v_type)
+                                    
+                                    # Log only when violation is reliable and passed TCB
+                                    logger.warning(f"VIOLATION LOGGED (TCB CLEAN): {v_type} for ID {tid}")
                                     break
                                 
         # Cleanup TCB for tracks no longer in view
@@ -668,20 +680,20 @@ class ViolationDetector:
                         details="Rider without helmet detected (High Precision ROI)"
                     )
                     violations.append(v)
-                    logger.warning(f"VIOLATION DETECTED: NO_HELMET for ID {track_id}")
-                    # self._set_cooldown(track_id, "NO_HELMET")
+                        # Removed raw logger call here to prevent ghost logs
+                        # self._set_cooldown(track_id, "NO_HELMET")
                     break
             
             # Also check riders whose head region has no helmet
             if track_id not in [v.track_id for v in violations if v.type == "NO_HELMET"]:
                 for rider in riders:
-                    head_region = get_upper_region(rider.box, ratio=0.25)
+                    head_region = get_upper_region(rider.box, ratio=0.3)
                     has_helmet = False
                     
                     for helmet in helmets:
-                        # Stricter association: Must overlap head region AND be contained inside rider box
-                        if boxes_overlap(head_region, helmet.box, threshold=0.2):
-                            if calculate_containment(helmet.box, rider.box) > 0.5:
+                        # Relaxed association: Overlap head region and at least 30% inside rider box
+                        if boxes_overlap(head_region, helmet.box, threshold=0.15):
+                            if calculate_containment(helmet.box, rider.box) > 0.3:
                                 has_helmet = True
                                 break
                     
@@ -695,7 +707,7 @@ class ViolationDetector:
                             details="No helmet detected in specialized head ROI"
                         )
                         violations.append(v)
-                        logger.warning(f"VIOLATION DETECTED: NO_HELMET for ID {track_id}")
+                        # Removed raw logger call here to prevent ghost logs
                         # self._set_cooldown(track_id, "NO_HELMET")
                         break
         

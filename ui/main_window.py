@@ -24,7 +24,8 @@ from PyQt5.QtWidgets import (QMenu,
     QButtonGroup
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon, QColor
+from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon, QColor, QTextDocument
+from PyQt5.QtPrintSupport import QPrinter
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -97,6 +98,7 @@ class DetectionThread(QThread):
         self.plate_accumulator = PlateReadingAccumulator()
         self.plate_relative_offsets = {} # {track_id: [rel_x1, rel_y1, rel_x2, rel_y2]}
         self.plate_ghost_count = defaultdict(int) # {track_id: frames_since_det}
+        self._consecutive_failures = 0
         
         # Wiring Parameters from UI
         self.stop_line_y = config.STOP_LINE_Y
@@ -210,6 +212,8 @@ class DetectionThread(QThread):
         
         # Fresh start for every run
         self.clear_caches()
+        if self.detector:
+            self.detector.reset_state()
         
         # Open video source
         if isinstance(self.source, int):
@@ -259,12 +263,22 @@ class DetectionThread(QThread):
             if not ret:
                 # Loop video file
                 if isinstance(self.source, str):
+                    self._consecutive_failures += 1
+                    if self._consecutive_failures > 10:
+                        logger.error("Consecutive video read failures. Stopping thread.")
+                        self.error.emit("Video source became unreachable or corrupted.")
+                        break
+                        
                     logger.info("Video Looping: Resetting Session (Persisting Plates)...")
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     self.clear_caches(hard=False)
+                    self.msleep(100) # Safety sleep to prevent 100% CPU on failing source
                     continue
                 else:
                     break
+            
+            # Reset failure count on success
+            self._consecutive_failures = 0
             
             try:
                 # Run multi-model detection
@@ -828,7 +842,7 @@ class MainWindow(QMainWindow):
         
         # Header Row (Brain Selector)
         header_row = QHBoxLayout()
-        header_row.addWidget(QLabel("<h2>Dashboard Overview</h2>"))
+        header_row.addWidget(QLabel("<h2>Dashboard Overview <span style='color: #888; font-size: 14px;'>v1.2 - Main</span></h2>"))
         header_row.addStretch()
         
         self.model_selector = ModelSelector()
@@ -926,9 +940,19 @@ class MainWindow(QMainWindow):
         self.violation_list = QListWidget()
         log_col.addWidget(self.violation_list, stretch=1)
         
-        self.btn_clear_log = QPushButton("Clear Activity")
+        # Bottom Controls for Log Column
+        btn_layout = QHBoxLayout()
+        self.btn_clear_log = QPushButton("Clear")
+        self.btn_clear_log.setToolTip("Clear Activity Log")
         self.btn_clear_log.clicked.connect(self.clear_log)
-        log_col.addWidget(self.btn_clear_log)
+        btn_layout.addWidget(self.btn_clear_log, stretch=1)
+        
+        self.btn_export_live_pdf = QPushButton("Export as PDF")
+        self.btn_export_live_pdf.setObjectName("stopBtn") # Red accent for Export
+        self.btn_export_live_pdf.clicked.connect(self.export_live_pdf)
+        btn_layout.addWidget(self.btn_export_live_pdf, stretch=2)
+        
+        log_col.addLayout(btn_layout)
         
         live_layout.addLayout(log_col, stretch=1)
         
@@ -1232,6 +1256,9 @@ class MainWindow(QMainWindow):
         self.seek_slider.setEnabled(False)
         
         self.detection_thread.set_source(source)
+        self.detection_thread.paused = False  # Ensure we start in PLAY mode
+        self.btn_nav_live.setChecked(True)     # Update sidebar state
+        self.tab_widget.setCurrentIndex(0)     # Switch to Live View tab
         self.detection_thread.start()
         
         self.is_running = True
@@ -1334,40 +1361,38 @@ class MainWindow(QMainWindow):
     def update_frame(self, frame: np.ndarray, detections: dict, violations: List[Violation], vehicle_info: list):
         """Update the video display with new frame and detections"""
         
-        # Create a set of track_ids that have violations
-        violator_ids = {v.track_id for v in violations if v.track_id is not None}
+        # Persistent Violation Highlighting: Identify all track IDs with a history of violations in this session
+        current_v_ids = {v.track_id for v in violations if v.track_id is not None}
+        past_v_ids = {int(tid) for (tid, v_type) in getattr(self, "seen_violations", set())}
+        all_violator_ids = current_v_ids.union(past_v_ids)
         
         # Draw main detections
         for det in detections.get("main", []):
-            cls_name = det.class_name.lower().strip()
-            if cls_name == "cell phone":
-                continue  # Skip drawing phone boxes as requested
+            if det.track_id is None:
+                continue
                 
+            det_tid = int(det.track_id)
+            cls_name = det.class_name.lower().strip()
             display_name = det.class_name
+            
             # Only show rider count if TRIPLE_RIDING toggle is enabled
             if det.class_name == "motorcycle" and hasattr(det, "rider_count") and config.ENABLED_VIOLATIONS.get("TRIPLE_RIDING", True):
-                display_name = f"Motorcycle ({det.rider_count} Riders)"
+                 display_name = f"Motorcycle ({det.rider_count} Riders)"
                 
-            label = f"{display_name} ID:{det.track_id}" if det.track_id is not None else display_name
+            label = f"{display_name} ID:{det_tid}"
+            color = (0, 255, 0) # Default Green
             
-            # Default color: Green if okay, Orange if questionable, Red if violating
-            color = (0, 255, 0) # Green
-            
-            # Specific color logic for Phone Usage Violations (Highlight the person red)
-            is_phone_violator = False
-            for v in violations:
-                if v.type == "PHONE_USAGE" and v.track_id == det.track_id:
-                    is_phone_violator = True
-                    break
-            
-            if det.track_id in violator_ids:
+            if det_tid in all_violator_ids:
                 color = (0, 0, 255) # Red for violators
-                # Find specific violation for label
-                v_type = next((v.type for v in violations if v.track_id == det.track_id), det.class_name)
-                label = f"VIOLATION! {v_type.replace('_', ' ').upper()}"
-            elif "Riders" in det.class_name:
-                # Highlight motorcycles with riders to show association is working
-                color = (255, 165, 0) # Orange
+                # Resolve the specific violation type (prefer current frame, fallback to history)
+                v_type = next((v.type for v in violations if v.track_id == det_tid), None)
+                if not v_type:
+                    history_matches = [vt for (tid, vt) in getattr(self, "seen_violations", set()) if int(tid) == det_tid]
+                    v_type = history_matches[0] if history_matches else "VIOLATION"
+                
+                label = f"! {v_type.replace('_', ' ').upper()}"
+            elif "Riders" in label:
+                color = (255, 165, 0) # Orange for associated riders
             
             # Draw plate in label if cached
             if det.track_id in self.detection_thread.vehicle_plates:
@@ -1459,21 +1484,18 @@ class MainWindow(QMainWindow):
         # Update stats
         self.update_stats()
         
-        # Convert frame to Qt format
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Convert frame to Qt format with memory safety
+        rgb_frame = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        
+        # .copy() is critical to avoid the image becoming black due to buffer garbage collection
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         
         # Scale to fit label
-        scaled = qt_image.scaled(
-            self.video_label.width(),
-            self.video_label.height(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
-        
-        self.video_label.setPixmap(QPixmap.fromImage(scaled))
+        self.video_label.setPixmap(QPixmap.fromImage(qt_image).scaled(
+            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
         
     def switch_brain(self, model_id):
         """Switch the AI model (Brain) used for LLM vision"""
@@ -1700,6 +1722,133 @@ class MainWindow(QMainWindow):
             webbrowser.open(f"file:///{filepath}")
         except:
             pass
+
+    def export_pdf(self):
+        """Export violations to a professional PDF report using native Qt printing"""
+        if not self.db or not self.report_gen:
+            QMessageBox.information(self, "Info", "Database/Report not available.")
+            return
+
+        records = self.db.get_violations()
+        if not records:
+            QMessageBox.information(self, "Info", "No violations to export.")
+            return
+
+        # Prepare filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"violations_report_{timestamp}.pdf"
+        reports_dir = str(Path(__file__).parent.parent / "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        filepath = os.path.join(reports_dir, filename)
+
+        try:
+            # 1. Generate the HTML report first as a temporary source
+            stats = self.db.get_stats()
+            html_path = self.report_gen.generate_html(records, stats, title="Official Traffic Violation Report")
+            
+            # Read the generated HTML
+            with open(html_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+
+            # 2. Setup Printer (Native Qt PDF Engine)
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(filepath)
+            printer.setPageSize(QPrinter.A4)
+            printer.setPageMargins(10, 10, 10, 10, QPrinter.Millimeter)
+            
+            # 3. Create Document and Print
+            document = QTextDocument()
+            document.setHtml(html_content)
+            document.print_(printer)
+            
+            QMessageBox.information(self, "PDF Report Generated", f"Professional PDF saved to:\n{filepath}")
+            
+            # Try to open
+            try:
+                import webbrowser
+                webbrowser.open(f"file:///{filepath}")
+            except:
+                pass
+                
+        except Exception as e:
+            logger.error(f"Failed to export PDF: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to generate PDF: {str(e)}")
+
+    def export_live_pdf(self):
+        """Export the current live vehicle table to a direct PDF table format"""
+        if self.vehicle_table.rowCount() == 0:
+            QMessageBox.information(self, "Info", "No data in the table to export.")
+            return
+
+        # Prepare filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"live_violations_{timestamp}.pdf"
+        filepath = os.path.join(os.path.dirname(os.path.dirname(__file__)), "reports", filename)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+        try:
+            # 1. Build a simple HTML table of the current UI view
+            rows = self.vehicle_table.rowCount()
+            cols = self.vehicle_table.columnCount()
+            headers = [self.vehicle_table.horizontalHeaderItem(i).text() for i in range(cols)]
+            
+            html = f"""
+            <html>
+            <head>
+                <style>
+                    body {{ font-family: sans-serif; padding: 20px; }}
+                    h1 {{ color: #2c3e50; text-align: center; font-size: 20px; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 12px; }}
+                    th {{ background-color: #34495e; color: white; padding: 8px; text-align: left; border: 1px solid #ddd; }}
+                    td {{ padding: 8px; border: 1px solid #ddd; }}
+                    tr:nth-child(even) {{ background-color: #f9f9f9; }}
+                    .footer {{ margin-top: 30px; font-size: 10px; color: #7f8c8d; text-align: center; }}
+                </style>
+            </head>
+            <body>
+                <h1>Live Session Violation Export</h1>
+                <p style="text-align: center; font-size: 11px;">Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <table>
+                    <thead><tr>{' '.join([f'<th>{h}</th>' for h in headers])}</tr></thead>
+                    <tbody>
+            """
+            
+            for r in range(rows):
+                html += "<tr>"
+                for c in range(cols):
+                    item = self.vehicle_table.item(r, c)
+                    val = item.text() if item else ""
+                    html += f"<td>{val}</td>"
+                html += "</tr>"
+                
+            html += """
+                    </tbody>
+                </table>
+                <div class="footer">TVDS Professional Autonomous AI Engine &middot; Official Session Log</div>
+            </body>
+            </html>
+            """
+
+            # 2. Print to PDF
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(filepath)
+            printer.setPageSize(QPrinter.A4)
+            printer.setPageMargins(15, 15, 15, 15, QPrinter.Millimeter)
+            
+            doc = QTextDocument()
+            doc.setHtml(html)
+            doc.print_(printer)
+            
+            QMessageBox.information(self, "Export Successful", f"Live table exported to:\n{filepath}")
+            
+            # Auto-open
+            import webbrowser
+            webbrowser.open(f"file:///{filepath}")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Export Failed", f"Could not create PDF: {str(e)}")
 
 
 def run_app():

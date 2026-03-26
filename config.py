@@ -69,17 +69,6 @@ DEVICE_TYPE = "auto"  # Can be "cpu", "cuda", or "auto"
 DEVICE, DEVICE_NAME = get_device(DEVICE_TYPE)
 CUDA_AVAILABLE = torch.cuda.is_available()
 
-def check_nvidia_smi():
-    """Diagnostic check for NVIDIA hardware regardless of torch state"""
-    import subprocess
-    try:
-        subprocess.run(["nvidia-smi"], capture_output=True, check=True)
-        return True
-    except:
-        return False
-
-HAS_NVIDIA_HARDWARE = check_nvidia_smi()
-
 # ============================================================
 # Detection Settings
 # ============================================================
@@ -88,7 +77,7 @@ CONFIDENCE_THRESHOLD = 0.5
 IOU_THRESHOLD = 0.4  # Tightened from 0.45 for better deduplication
 
 # Helmet detection specific
-HELMET_CONFIDENCE = 0.5  # High confidence to avoid false positives
+HELMET_CONFIDENCE = 0.3  # Increased sensitivity for safer detection
 HELMET_CLASSES = {
     "helmet": ["helmet", "with_helmet", "Helmet", "With helmet", "with helmet", "0"],
     "no_helmet": ["no_helmet", "without_helmet", "head", "no-helmet", "No Helmet", "Without helmet", "  Without helmet", "1"]
@@ -154,13 +143,13 @@ TRIPLE_RIDING_MIN_PERSONS = 3  # Detect if rider count is >= this value
 # Phone Usage Detection
 ENABLE_PHONE_USAGE_DETECTION = True
 USE_MEDIAPIPE_PHONE = True  # Uses PoseLandmarker for calling gesture
-PHONE_DETECTION_CONFIDENCE = 0.5
+PHONE_DETECTION_CONFIDENCE = 0.15
 PHONE_NEAR_PERSON_MARGIN = 50  # Pixels to check around person for phone object
 
 # Tracker Settings
 USE_CUSTOM_TRACKER = True      # Use ConstraintAwareSORT
-TRACKER_MAX_AGE = 30           # Reduced from 50 to minimize box ghosting after objects leave frame
-TRACKER_MIN_HITS = 2           # Faster track initialization
+TRACKER_MAX_AGE = 50           # Increased back to 50 for more robust persistence
+TRACKER_MIN_HITS = 3           # Increased to 3 for better track confidence
 TRACKER_IOU_THRESHOLD = 0.25   # Slightly more relaxed to handle fast motion
 TRACKER_STOP_LINE_GATING = True
 

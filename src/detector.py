@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import config
 from src.utils import non_max_suppression, calculate_iou, calculate_containment
+from src.logger import get_logger
+
+logger = get_logger("Detector")
 
 
 @dataclass
@@ -111,6 +114,9 @@ class MultiModelDetector:
             "plates": []
         }
         
+        if frame is None or frame.size == 0:
+            return results
+        
         # Apply CLAHE if enabled (for CCTV enhancement)
         full_enhanced_frame = frame
         if getattr(config, 'ENABLE_CLAHE', False):
@@ -139,13 +145,28 @@ class MultiModelDetector:
         
         # --- PRIMARY DETECTION ---
         # Run main model with tracking and adaptive resolution
-        main_detections = self._run_model(
+        # We run the raw model at a low confidence (0.20) because tiny objects like 
+        # cell phones rarely hit the strict vehicle confidence thresholds
+        raw_main_detections = self._run_model(
             self.main_model,
             inference_frame,
             track=track,
             source="main",
+            confidence=0.20,
             imgsz=current_imgsz
         )
+        
+        # Apply strict class-specific confidence thresholds post-tracking
+        # This prevents low-confidence ghost cars while allowing low-confidence tiny phones
+        main_detections = []
+        for d in raw_main_detections:
+            if d.class_name == "cell phone":
+                if d.confidence >= getattr(config, 'PHONE_DETECTION_CONFIDENCE', 0.15):
+                    main_detections.append(d)
+            else:
+                if d.confidence >= config.CONFIDENCE_THRESHOLD:
+                    main_detections.append(d)
+
         
         # Adjust detection boxes back to full frame if ROI was used
         if inference_box:
@@ -178,72 +199,49 @@ class MultiModelDetector:
             main_detections = others + persons
             results["main"] = main_detections
 
-        # --- Cascade Detection for Helmets (ABSENCE-BASED) ---
-        # Strategy: Run the helmet model on each rider. If a confident "helmet/with_helmet"
-        # detection overlaps the rider's head → Helmet. If NO such detection exists → No Helmet.
-        # This is far more reliable than trusting the model's "no_helmet" class output.
+        # --- Cascade Detection for Helmets (Global Frame Context) ---
+        # Instead of feeding tiny heavily-zoomed person crops to the AI (which causes it to lose 
+        # spatial context and hallucinate dark hair as "helmets"), we run the helmet model on the 
+        # entire global frame so it understands proportional sizes. 
         if self.helmet_model is not None:
-            persons = [d for d in main_detections if d.class_name == "person"]
-            motorcycles = [d for d in main_detections if d.class_name == "motorcycle"]
+            # We use a lower confidence to capture both classes (helmet / no_helmet)
+            global_helmet_dets = self._run_model(
+                self.helmet_model,
+                inference_frame,
+                track=False,
+                source="helmet",
+                imgsz=640,  # Lock to 640 to prevent PyTorch CUDA OOM deadlock on dual-inference
+                confidence=config.HELMET_CONFIDENCE
+            )
             
-            if persons:
-                for person in persons:
-                    # --- HIGH PRECISION RIDER IDENTIFICATION ---
-                    is_rider = any(self._boxes_overlap(person.box, moto.box, threshold=0.15) for moto in motorcycles)
-                    
-                    if not is_rider:
-                        px_mid = (person.box[0] + person.box[2]) / 2
-                        for moto in motorcycles:
-                            moto_w = moto.box[2] - moto.box[0]
-                            dist_x = abs(px_mid - (moto.box[0] + moto.box[2])/2)
-                            dist_y = abs(person.box[3] - moto.box[1])
-                            if dist_x < moto_w * 0.4 and dist_y < moto_w * 0.3:
-                                is_rider = True
-                                break
+            # Map inference_frame coordinates back to full frame if Dynamic ROI was used
+            if inference_box:
+                x1, y1, _, _ = inference_box
+                for det in global_helmet_dets:
+                    dx1, dy1, dx2, dy2 = det.box
+                    det.box = [dx1 + x1, dy1 + y1, dx2 + x1, dy2 + y1]
 
-                    if not is_rider: continue
-
-                    x1, y1, x2, y2 = map(int, person.box)
-                    h, w = frame.shape[:2]
-                    margin_y = int((y2 - y1) * 0.2); margin_x = int((x2 - x1) * 0.2)
-                    x1 = max(0, x1 - margin_x); y1 = max(0, y1 - margin_y)
-                    x2 = min(w, x2 + margin_x); y2 = min(h, y2 + margin_y)
-                    
-                    crop = full_enhanced_frame[y1:y2, x1:x2]
-                    if crop.size == 0: continue
-                    
-                    crop_detections = self._run_model(
-                        self.helmet_model, crop, track=False, source="helmet",
-                        confidence=config.HELMET_CONFIDENCE
-                    )
-                    
-                    # --- ABSENCE-BASED LOGIC (Using Model's Head Geometry) ---
-                    # The helmet model ALWAYS outputs class_id=0 "With helmet" regardless of reality.
-                    # However, its bounding box accurately surrounds the HEAD.
-                    # Instead of mathematical guessing, we take the model's tight head bounding box
-                    # and forcefully label it as "No Helmet". LLM verification will override false positives.
-                    best_head_box = None
-                    best_conf = 0
-                    
-                    for d in crop_detections:
-                        if getattr(d, 'confidence', d.confidence) > best_conf:
-                            best_conf = d.confidence
-                            dx1, dy1, dx2, dy2 = d.box
-                            best_head_box = [x1 + dx1, y1 + dy1, x1 + dx2, y1 + dy2]
-                            
-                    # Fallback to math box if the model failed to detect the head entirely
-                    if not best_head_box:
-                        best_head_box = list(self._get_head_region(person.box))
-                    
-                    no_helmet_det = Detection(
-                        box=best_head_box,
-                        class_id=1,
-                        class_name="No Helmet",
-                        confidence=best_conf if best_conf > 0 else 0.90,
-                        track_id=person.track_id,
-                        source_model="helmet"
-                    )
-                    results["helmets"].append(no_helmet_det)
+            # We must associate these global helmet detections to the tracking IDs of the persons
+            persons = [d for d in main_detections if d.class_name == "person"]
+            
+            for d in global_helmet_dets:
+                d.class_name = self._normalize_helmet_class(d.class_name)
+                
+                # Find which person this helmet belongs to based on strict containment in upper body
+                best_person_id = None
+                highest_iou = 0
+                
+                for p in persons:
+                    # Check if the helmet box is generally inside the person box
+                    p_head_roi = self._get_head_region(p.box)
+                    overlap = calculate_iou(d.box, p_head_roi)
+                    if overlap > highest_iou and overlap > 0.05: # Even a tiny overlap on head ROI is enough
+                        highest_iou = overlap
+                        best_person_id = p.track_id
+                        
+                if best_person_id is not None:
+                    d.track_id = best_person_id
+                    results["helmets"].append(d)
 
         # --- Plate Detection (Cascade on Vehicle Crops) ---
         if self.plate_model is not None:
@@ -325,6 +323,7 @@ class MultiModelDetector:
             if track:
                 model_results = model.track(
                     frame,
+                    device=self.device,
                     conf=global_conf,
                     iou=config.IOU_THRESHOLD,
                     persist=True,
@@ -334,6 +333,7 @@ class MultiModelDetector:
             else:
                 model_results = model(
                     frame,
+                    device=self.device,
                     conf=global_conf,
                     iou=config.IOU_THRESHOLD,
                     verbose=False,
@@ -389,19 +389,17 @@ class MultiModelDetector:
         return detections
     
     def _normalize_helmet_class(self, class_name: str) -> str:
-        """Normalize helmet class names to standard format"""
-        class_lower = class_name.lower()
-        
-        # Debug print for rare/new classes
-        # print(f"DEBUG: Normalizing class '{class_name}'")
+        """Normalize helmet class names to standard format using robust matching"""
+        # Clean the input: lower case, strip spaces, and normalize separators
+        test_name = class_name.lower().strip().replace(' ', '_').replace('-', '_')
         
         for standard_name, variants in config.HELMET_CLASSES.items():
             for variant in variants:
-                if variant.lower() in class_lower:
-                    # print(f"  -> Match found: {standard_name} (variant: {variant})")
+                # Normalize the variant for comparison
+                v_norm = variant.lower().strip().replace(' ', '_').replace('-', '_')
+                if v_norm == test_name:
                     return standard_name
         
-        print(f"WARNING: Unknown helmet class '{class_name}' - please add to attributes in config.py")
         return class_name
     
     def _normalize_plate_class(self, class_name: str) -> str:
@@ -480,9 +478,9 @@ class MultiModelDetector:
             riders_on_moto = []
             
             for person in persons:
-                # Check if person overlaps with motorcycle (riding it)
+                # Relaxed overlap for partial person detections
                 iou = calculate_iou(person.box, moto.box)
-                if iou > iou_threshold:
+                if iou > 0.10:
                     riders_on_moto.append(person)
             
             # For each rider, check helmet status
@@ -490,12 +488,12 @@ class MultiModelDetector:
                 rider_id = rider.track_id if rider.track_id else id(rider)
                 helmet_status = "unknown"
                 
-                # Check for helmet near rider's upper body
+                # Widened head ROI for better association
                 rider_head_box = self._get_head_region(rider.box)
                 
-                # Check for helmet
+                # Check for helmet - relaxed overlap
                 for helmet in helmets:
-                    if self._boxes_overlap(helmet.box, rider_head_box, threshold=0.2):
+                    if self._boxes_overlap(helmet.box, rider_head_box, threshold=0.15):
                         helmet_status = "helmet"
                         break
                 
@@ -624,6 +622,13 @@ class MultiModelDetector:
         self.roi_persistence = 10 # Keep for 10 frames even if motion stops/slows
         
         return current_roi
+
+    def reset_state(self):
+        """Reset internal state for a new video session"""
+        self.prev_frame = None
+        self.roi_cache = None
+        self.roi_persistence = 0
+        logger.info("Detector state reset: ROI and motion history cleared.")
 
 
 # Backward compatibility alias
