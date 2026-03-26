@@ -548,8 +548,8 @@ class ViolationDetector:
         phones = [d for d in main_dets if d.class_name == "cell phone"]
         
         # Get helmet detections
-        helmets = [d for d in helmet_dets if d.class_name == "helmet"]
-        no_helmets = [d for d in helmet_dets if d.class_name == "no_helmet"]
+        helmets = [d for d in helmet_dets if d.class_name.lower().replace(' ', '_') == "helmet"]
+        no_helmets = [d for d in helmet_dets if d.class_name.lower().replace(' ', '_') in ("no_helmet", "no helmet")]
         
         # Get plate detections
         plates = plate_dets
@@ -609,12 +609,14 @@ class ViolationDetector:
                 # If detected in this frame, check if it's now reliable
                 if is_detected:
                     if self.tcb.is_reliable(tid, v_type):
-                        # Find the actual Violation object to include in final list
-                        # We use the most recent one detected
-                        for v in all_violations:
-                            if v.track_id == tid and v.type == v_type:
-                                final_violations.append(v)
-                                break
+                        if not self._is_on_cooldown(tid, v_type):
+                            # Find the actual Violation object to include in final list
+                            # We use the most recent one detected
+                            for v in all_violations:
+                                if v.track_id == tid and v.type == v_type:
+                                    final_violations.append(v)
+                                    self._set_cooldown(tid, v_type)
+                                    break
                                 
         # Cleanup TCB for tracks no longer in view
         # We can do this periodically or based on track_history cleanup

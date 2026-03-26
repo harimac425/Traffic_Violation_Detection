@@ -218,50 +218,21 @@ class MultiModelDetector:
                     )
                     
                     # --- ABSENCE-BASED LOGIC ---
-                    # Get the rider's head region (top 30% of person box)
+                    # The helmet model (helmet_yolov8n.pt) ALWAYS outputs class_id=0 "With helmet"
+                    # regardless of whether a helmet is visible. It cannot distinguish helmet from no-helmet.
+                    # Therefore: Flag ALL riders as "No Helmet" and let the violations pipeline's 
+                    # LLM verification (main_window.py line ~462) confirm or override.
                     head_box = list(self._get_head_region(person.box))
                     
-                    # Check if ANY model detection is a positive helmet in the head region
-                    found_helmet = False
-                    best_helmet_det = None
-                    
-                    for d in crop_detections:
-                        dx1, dy1, dx2, dy2 = d.box
-                        absolute_box = [x1 + dx1, y1 + dy1, x1 + dx2, y1 + dy2]
-                        
-                        containment = calculate_containment(absolute_box, person.box)
-                        if containment < 0.6: continue
-                        
-                        c_name = d.class_name.lower().strip()
-                        # A POSITIVE helmet detection = model says "with helmet" / class_id=0
-                        is_positive_helmet = ("without" not in c_name and "no" not in c_name and d.class_id == 0)
-                        
-                        if is_positive_helmet and d.confidence >= 0.6:
-                            # Check if this helmet detection actually overlaps the HEAD region
-                            head_overlap = calculate_iou(absolute_box, head_box)
-                            if head_overlap > 0.05:
-                                found_helmet = True
-                                best_helmet_det = d
-                                best_helmet_det.box = absolute_box
-                                break
-                    
-                    # --- DECISION ---
-                    if found_helmet and best_helmet_det:
-                        # Confirmed helmet on head
-                        best_helmet_det.class_name = "Helmet"
-                        best_helmet_det.track_id = person.track_id
-                        results["helmets"].append(best_helmet_det)
-                    else:
-                        # NO helmet found on this rider's head → Flag as No Helmet
-                        no_helmet_det = Detection(
-                            box=head_box,
-                            class_id=1,
-                            class_name="No Helmet",
-                            confidence=0.95,
-                            track_id=person.track_id,
-                            source_model="helmet"
-                        )
-                        results["helmets"].append(no_helmet_det)
+                    no_helmet_det = Detection(
+                        box=head_box,
+                        class_id=1,
+                        class_name="No Helmet",
+                        confidence=0.90,
+                        track_id=person.track_id,
+                        source_model="helmet"
+                    )
+                    results["helmets"].append(no_helmet_det)
 
         # --- Plate Detection (Cascade on Vehicle Crops) ---
         if self.plate_model is not None:
