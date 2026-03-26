@@ -531,9 +531,14 @@ class MultiModelDetector:
         """Get approximate head region from person bounding box"""
         x1, y1, x2, y2 = person_box
         height = y2 - y1
-        # Head is approximately top 25% of person box
+        width = x2 - x1
+        
+        # Head is approximately top 25% of height, and center 40% of width
         head_y2 = y1 + height * 0.25
-        return (x1, y1, x2, head_y2)
+        head_x1 = x1 + width * 0.3
+        head_x2 = x2 - width * 0.3
+        
+        return (head_x1, y1, head_x2, head_y2)
     
     def _boxes_overlap(self, box1: tuple, box2: tuple, threshold: float = 0.1) -> bool:
         """Check if two boxes overlap above threshold"""

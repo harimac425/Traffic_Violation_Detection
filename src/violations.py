@@ -205,7 +205,7 @@ class ViolationDetector:
                         timestamp=time.time(),
                         details="Rider without helmet detected"
                     ))
-                    self._set_cooldown(track_id, "NO_HELMET")
+                    # self._set_cooldown(track_id, "NO_HELMET")
         
         return violations
     
@@ -245,7 +245,7 @@ class ViolationDetector:
                     timestamp=time.time(),
                     details=f"EXCESS RIDING: {rider_count} people on motorcycle"
                 ))
-                self._set_cooldown(track_id, "TRIPLE_RIDING")
+                # self._set_cooldown(track_id, "TRIPLE_RIDING")
         
         return violations
     
@@ -288,7 +288,7 @@ class ViolationDetector:
                     timestamp=time.time(),
                     details=f"Speed: {speed:.1f} km/h (Limit: {config.SPEED_LIMIT_KMH})"
                 ))
-                self._set_cooldown(track_id, "OVERSPEED")
+                # self._set_cooldown(track_id, "OVERSPEED")
         
         return violations
     
@@ -333,7 +333,7 @@ class ViolationDetector:
                             timestamp=time.time(),
                             details=f"Vehicle moving at {direction:.0f}° (Allowed: {min_angle}°-{max_angle}°)"
                         ))
-                        self._set_cooldown(track_id, "WRONG_WAY")
+                        # self._set_cooldown(track_id, "WRONG_WAY")
                 else:
                     violations.append(Violation(
                         type="WRONG_WAY",
@@ -343,7 +343,7 @@ class ViolationDetector:
                         timestamp=time.time(),
                         details=f"Vehicle moving at {direction:.0f}° (Allowed: {min_angle}°-{max_angle}°)"
                     ))
-                    self._set_cooldown(track_id, "WRONG_WAY")
+                    # self._set_cooldown(track_id, "WRONG_WAY")
         
         return violations
     
@@ -387,7 +387,7 @@ class ViolationDetector:
                 timestamp=time.time(),
                 details=pv.details
             ))
-            self._set_cooldown(pv.track_id or 0, "PHONE_USAGE")
+            # self._set_cooldown(pv.track_id or 0, "PHONE_USAGE")
         
         return violations
 
@@ -439,7 +439,7 @@ class ViolationDetector:
                 timestamp=time.time(),
                 details=sv.details
             ))
-            self._set_cooldown(sv.track_id, "RED_SIGNAL")
+            # self._set_cooldown(sv.track_id, "RED_SIGNAL")
             
         return violations
 
@@ -501,7 +501,7 @@ class ViolationDetector:
                             timestamp=time.time(),
                             details=f"No plate detected ({frames_with_plate}/{frames_seen} frames)"
                         ))
-                        self._set_cooldown(track_id, "MISSING_PLATE")
+                        # self._set_cooldown(track_id, "MISSING_PLATE")
         
         return violations
     
@@ -669,7 +669,7 @@ class ViolationDetector:
                     )
                     violations.append(v)
                     logger.warning(f"VIOLATION DETECTED: NO_HELMET for ID {track_id}")
-                    self._set_cooldown(track_id, "NO_HELMET")
+                    # self._set_cooldown(track_id, "NO_HELMET")
                     break
             
             # Also check riders whose head region has no helmet
@@ -696,7 +696,7 @@ class ViolationDetector:
                         )
                         violations.append(v)
                         logger.warning(f"VIOLATION DETECTED: NO_HELMET for ID {track_id}")
-                        self._set_cooldown(track_id, "NO_HELMET")
+                        # self._set_cooldown(track_id, "NO_HELMET")
                         break
         
         return violations
@@ -745,6 +745,6 @@ class ViolationDetector:
                     timestamp=time.time(),
                     details="Vehicle on Zebra Crossing"
                 ))
-                self._set_cooldown(track_id, "ZEBRA_CROSSING")
+                # self._set_cooldown(track_id, "ZEBRA_CROSSING")
                 
         return violations
