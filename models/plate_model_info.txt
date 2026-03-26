@@ -1,0 +1,8 @@
+License Plate Detection Model Configuration
+========================================
+Expected classes:
+  0: license_plate
+
+Recommended sources:
+  - Hugging Face: morsetechlab/yolo11-license-plate-detection
+  - Roboflow: license-plate-recognition

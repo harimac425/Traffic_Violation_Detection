@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+*.db
+aaa/
+evidence/
+logs/
+reports/
+.env
+settings.json
+documentation/
+Traffic_Violation_Detection-main/
+TVDS_old.exe
+build/
+dist/
+*.spec

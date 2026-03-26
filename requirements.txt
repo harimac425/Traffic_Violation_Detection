@@ -1,0 +1,17 @@
+ultralytics
+torch
+torchvision
+opencv-python
+PyQt5
+filterpy
+scipy
+mediapipe
+easyocr
+
+google-generativeai
+openai
+python-docx
+python-pptx
+numpy
+Pillow
+requests

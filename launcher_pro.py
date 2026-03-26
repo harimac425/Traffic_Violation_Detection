@@ -1,0 +1,834 @@
+import os
+import sys
+import subprocess
+import logging
+import platform
+import shutil
+import time
+import json
+import winreg # For deep registry lookup
+from pathlib import Path
+
+# --- Constants ---
+IS_FROZEN = getattr(sys, 'frozen', False)
+EXE_PATH = Path(sys.executable)
+APP_DIR = EXE_PATH.parent if IS_FROZEN else Path(__file__).parent
+
+# --- Configuration ---
+APP_NAME = "Traffic Violation Detection System"
+APP_SHORT_NAME = "TVDS"
+VERSION = "1.0.0"
+LOG_DIR = Path("logs")
+BOOTSTRAP_LOG = LOG_DIR / "bootstrap.log"
+REQUIREMENTS_FILE = Path("requirements.txt")
+MAIN_SCRIPT = Path("main.py")
+MODELS_DIR = Path("models")
+REPAIR_ATTEMPTS = 0
+MAX_REPAIR_ATTEMPTS = 2
+PYTHON_ENV_DIR = APP_DIR / "python_env"
+LOCAL_PYTHON_EXE = PYTHON_ENV_DIR / "python.exe"
+
+# --- Logging Setup ---
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(BOOTSTRAP_LOG, mode='a'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("Bootstrap")
+
+def log_header():
+    logger.info("=" * 60)
+    logger.info(f"  {APP_NAME} v{VERSION}")
+    logger.info(f"  SYSTEM BOOTSTRAP: {datetime_now()}")
+    logger.info("=" * 60)
+
+def datetime_now():
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# --- Utilities ---
+
+def get_python_from_registry():
+    """Queries the Windows Registry for installed Python interpreters."""
+    found_paths = []
+    
+    # We check both User and Local Machine hives
+    hives = [winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]
+    base_key = r"Software\Python\PythonCore"
+    
+    for hive in hives:
+        try:
+            with winreg.OpenKey(hive, base_key) as root_key:
+                # Iterate through version keys (e.g., 3.12)
+                i = 0
+                while True:
+                    try:
+                        version = winreg.EnumKey(root_key, i)
+                        i += 1
+                        
+                        # Dive into InstallPath
+                        try:
+                            install_path_key = f"{base_key}\\{version}\\InstallPath"
+                            with winreg.OpenKey(hive, install_path_key) as ipk:
+                                # 1. Try to get ExecutablePath (preferred)
+                                try:
+                                    exe_path, _ = winreg.QueryValueEx(ipk, "ExecutablePath")
+                                    if exe_path and os.path.exists(exe_path):
+                                        found_paths.append(exe_path)
+                                except:
+                                    pass
+                                    
+                                # 2. Try Default value (Install directory)
+                                try:
+                                    folder = winreg.QueryValue(ipk, None) # Returns string, not tuple
+                                    if folder:
+                                        exe_path = os.path.join(folder, "python.exe")
+                                        if os.path.exists(exe_path):
+                                            found_paths.append(exe_path)
+                                except:
+                                    pass
+                        except:
+                            continue
+                    except OSError: # End of keys
+                        break
+        except FileNotFoundError:
+            continue
+            
+    return found_paths
+
+def get_python_path():
+    """Searches for a valid Python interpreter, prioritizing the local portable environment."""
+    potential_interpreters = []
+
+    # 0. Local Portable Environment (Highest Priority)
+    if LOCAL_PYTHON_EXE.exists():
+        logger.info(f"[OK] Local Portable Python detected: {LOCAL_PYTHON_EXE}")
+        return str(LOCAL_PYTHON_EXE)
+
+    # 1. Registry Lookup (Most consistent as requested)
+    logger.info("[*] Searching Windows Registry for Python installations...")
+    registry_paths = get_python_from_registry()
+    potential_interpreters.extend(registry_paths)
+
+    # 2. Try 'python' and 'python3' commands from PATH
+    logger.info("[*] Scanning System PATH for Python...")
+    for cmd in ["python", "python3", "py -3", "py"]:
+        try:
+            check_cmd = ["where", cmd.split()[0]] if os.name == 'nt' else ["which", cmd]
+            res = subprocess.run(check_cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                paths = res.stdout.strip().split('\n')
+                for p in paths:
+                    potential_interpreters.append(p.strip())
+        except:
+            continue
+
+    # 3. Hardcoded fallback paths
+    common_paths = [
+        os.path.expandvars(r"%LocalAppData%\Programs\Python\Python312\python.exe"),
+        os.path.expandvars(r"%LocalAppData%\Programs\Python\Python311\python.exe"),
+        os.path.expandvars(r"%LocalAppData%\Programs\Python\Python310\python.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Python312\python.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Python311\python.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Python310\python.exe"),
+    ]
+    potential_interpreters.extend(common_paths)
+
+    # Validate all found paths
+    visited_paths = set()
+    logger.info("[*] Filtering for STRICT Python 3.10 environment...")
+    
+    # First pass: Look for 3.10 explicitly
+    for p in potential_interpreters:
+        p = p.strip()
+        if not p or p in visited_paths: continue
+        visited_paths.add(p)
+        
+        if not os.path.exists(p): continue
+        if not "python" in p.lower(): continue
+        
+        # Check version
+        try:
+            v_check = subprocess.run([p, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], 
+                                   capture_output=True, text=True, timeout=2, check=False)
+            if v_check.returncode == 0 and v_check.stdout.strip() == "3.10":
+                logger.info(f"    [MATCH] Found verified Python 3.10: {p}")
+                return p
+        except:
+            continue
+
+    logger.warning("[!] No compatible Python 3.10 installation found on this system.")
+    return None
+
+PYTHON_EXE = None
+
+def run_command(cmd, wait=True, stream=False, use_system_python=False):
+    """Safely runs a command with full environment isolation."""
+    # Create isolated environment (Scrub PyInstaller/Host variables)
+    env = os.environ.copy()
+    for var in ['PYTHONPATH', 'PYTHONHOME', 'PYTHONEXECUTABLE', 'PYTHONNOUSERSITE']:
+        env.pop(var, None)
+    
+    if use_system_python and cmd[0] == sys.executable:
+        cmd[0] = PYTHON_EXE
+        
+    try:
+        if wait:
+            if stream:
+                # Direct piping to console for real-time progress (pip install etc)
+                result = subprocess.run(cmd, check=False, env=env)
+                return result.returncode, "", ""
+            else:
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+                return result.returncode, result.stdout, result.stderr
+        else:
+            subprocess.Popen(cmd, env=env)
+            return 0, "", ""
+    except Exception as e:
+        return -1, "", str(e)
+
+# --- Environment Checks ---
+
+def check_python():
+    """Verifies the targeted Python environment's version."""
+    logger.info(f"[*] Verifying Targeted Python: {PYTHON_EXE}")
+    
+    try:
+        # Check version of the TARGET python, not the launcher's own python
+        v_check = subprocess.run([PYTHON_EXE, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"], 
+                               capture_output=True, text=True, timeout=5, check=False)
+        if v_check.returncode == 0:
+            v_str = v_check.stdout.strip()
+            logger.info(f"[*] Targeted Python Version: {v_str}")
+            if v_str == "3.10":
+                return True
+            else:
+                logger.error(f"[!] ERROR: Target Python is {v_str}. Python 3.10 is REQUIRED for AI stability.")
+                return False
+    except Exception as e:
+        logger.error(f"[!] Failed to verify Python version: {e}")
+        return False
+    
+    return False
+
+def check_gpu():
+    """Checks if a compatible NVIDIA GPU is available."""
+    logger.info("[*] Searching for NVIDIA GPU acceleration hardware...")
+    rc, out, err = run_command(["nvidia-smi"])
+    if rc == 0:
+        logger.info("[OK] NVIDIA GPU detected.")
+        return True
+    else:
+        logger.info("[INFO] No NVIDIA GPU detected or drivers missing. Switching to CPU optimization.")
+        return False
+
+def download_file(url, target_path, timeout=(30, 60)):
+    """Downloads a file from a URL with progress logging and timeout.
+    
+    Args:
+        url: URL to download from
+        target_path: Local path to save the file
+        timeout: (connect_timeout, read_timeout) in seconds
+    """
+    import requests
+    try:
+        logger.info(f"[*] Downloading: {url}")
+        headers = {'User-Agent': 'TVDS-Bootstrapper/1.0'}
+        response = requests.get(url, stream=True, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        
+        total = int(response.headers.get('Content-Length', 0))
+        downloaded = 0
+        start_time = time.time()
+        
+        with open(target_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=65536):
+                f.write(chunk)
+                downloaded += len(chunk)
+                elapsed = time.time() - start_time
+                speed = downloaded / max(elapsed, 0.001)
+                speed_str = f"{speed / 1024 / 1024:.1f} MB/s" if speed > 1024*1024 else f"{speed / 1024:.0f} KB/s"
+                if total:
+                    pct = downloaded / total * 100
+                    print(f"\r  Progress: {pct:5.1f}%  ({downloaded // 1024 // 1024}MB / {total // 1024 // 1024}MB)  {speed_str}  ", end="", flush=True)
+                else:
+                    print(f"\r  Downloaded: {downloaded // 1024 // 1024}MB  {speed_str}  ", end="", flush=True)
+        
+        print()  # newline after progress
+        
+        if total and downloaded < total:
+            logger.error(f"[ERROR] Incomplete download: {downloaded}/{total} bytes")
+            if os.path.exists(target_path):
+                os.remove(target_path)
+            return False
+        
+        logger.info(f"[OK] Download complete: {downloaded / 1024 / 1024:.1f} MB")
+        return True
+    except requests.exceptions.Timeout:
+        logger.error(f"[ERROR] Download timed out after {timeout}s - server may be unreachable")
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        return False
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[ERROR] Connection failed: {e}")
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        return False
+    except Exception as e:
+        logger.error(f"[ERROR] Download failed: {e}")
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        return False
+
+def recover_source_code():
+    """Downloads and extracts the application source code from the master repository."""
+    import zipfile
+    source_url = "https://github.com/harimac425/Traffic_Violation_Detection/archive/refs/heads/momcodebase.zip"
+    zip_tmp = APP_DIR / "source_temp.zip"
+    
+    logger.info("\n" + "*" * 60)
+    logger.info("  STANDALONE BOOTSTRAP: Application source code missing.")
+    logger.info("  Recovering from repository: momcodebase branch...")
+    logger.info("*" * 60)
+    
+    if download_file(source_url, zip_tmp):
+        try:
+            logger.info("[*] Extracting source code...")
+            with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+                # GitHub ZIPs usually have a top-level folder like 'RepoName-BranchName'
+                zip_ref.extractall(APP_DIR)
+            
+            # Find the extracted folder
+            extracted_dirs = [d for d in APP_DIR.iterdir() if d.is_dir() and "Traffic_Violation_Detection-momcodebase" in d.name]
+            if extracted_dirs:
+                root_src = extracted_dirs[0]
+                logger.info(f"[*] Moving files from {root_src.name} to application root...")
+                running_exe_name = EXE_PATH.name
+                
+                for item in root_src.iterdir():
+                    # CRITICAL: Do NOT attempt to overwrite the running EXE (WinError 5)
+                    if item.name == running_exe_name:
+                        logger.info(f"    [SKIP] Protected file (active): {item.name}")
+                        continue
+                        
+                    dest = APP_DIR / item.name
+                    try:
+                        if dest.exists():
+                            if dest.is_dir(): shutil.rmtree(dest)
+                            else: os.remove(dest)
+                        shutil.move(str(item), str(dest))
+                    except Exception as move_err:
+                        logger.warning(f"    [WARN] Could not move {item.name}: {move_err}")
+                
+                # Cleanup
+                shutil.rmtree(root_src, ignore_errors=True)
+                if zip_tmp.exists(): os.remove(zip_tmp)
+                
+                logger.info("[SUCCESS] Application source code recovered.")
+                return True
+            else:
+                logger.error("[ERROR] Could not find extracted source directory.")
+                return False
+        except Exception as e:
+            logger.error(f"[ERROR] Extraction failed: {e}")
+            return False
+    return False
+
+def check_pip():
+    """Verifies if PIP is available and functional in the targeted environment."""
+    logger.info("[*] Verifying PIP availability...")
+    rc, out, err = run_command([PYTHON_EXE, "-m", "pip", "--version"])
+    if rc == 0:
+        logger.info(f"[OK] PIP detected: {out.strip()}")
+        return True
+    logger.warning("[!] PIP is missing or broken in the current environment.")
+    return False
+
+def reconstruct_pth_file():
+    """Forces the .pth file to include all necessary search paths for the portable environment."""
+    pth_file = PYTHON_ENV_DIR / "python310._pth"
+    logger.info(f"[*] Reconstructing {pth_file.name} for deep compatibility...")
+    
+    # Standard paths for an embeddable python + our customizations
+    content = [
+        "python310.zip",
+        ".",
+        "Lib/site-packages",
+        "import site" # CRITICAL for enabling site-packages logic
+    ]
+    
+    try:
+        with open(pth_file, 'w') as f:
+            for line in content:
+                f.write(line + "\n")
+        logger.info("[SUCCESS] .pth file reconstructed.")
+        return True
+    except Exception as e:
+        logger.error(f"[ERROR] .pth reconstruction failed: {e}")
+        return False
+
+def bootstrap_pip():
+    """Installs PIP and configures the portable environment's .pth file."""
+    logger.info("[*] Bootstrapping PIP for portable environment...")
+    pip_root = APP_DIR / "temp_pip"
+    pip_root.mkdir(exist_ok=True)
+    get_pip_script = pip_root / "get-pip.py"
+    
+    url = "https://bootstrap.pypa.io/get-pip.py"
+    if download_file(url, get_pip_script):
+        rc, out, err = run_command([str(LOCAL_PYTHON_EXE), str(get_pip_script)], stream=True)
+        if rc == 0:
+            logger.info("[SUCCESS] PIP bootstrapped.")
+            
+            # CRITICAL: Modify python310._pth to enable site-packages
+            pth_file = PYTHON_ENV_DIR / "python310._pth"
+            if pth_file.exists():
+                logger.info("[*] Configuring .pth for site-packages support...")
+                with open(pth_file, 'r') as f:
+                    lines = f.readlines()
+                
+                # Check if 'import site' is already uncommented
+                has_site = any(line.strip() == "import site" for line in lines)
+                has_site_packages = any("site-packages" in line for line in lines)
+                
+                with open(pth_file, 'w') as f:
+                    for line in lines:
+                        if line.strip() == "#import site" or line.strip() == "import site":
+                            if not has_site:
+                                f.write("import site\n")
+                                has_site = True
+                        else:
+                            f.write(line)
+                    
+                    if not has_site_packages:
+                        f.write("Lib/site-packages\n")
+            
+            shutil.rmtree(pip_root, ignore_errors=True)
+            return True
+    return False
+
+def force_wipe_portable_env():
+    """Wipes the portable environment if it's corrupted beyond repair."""
+    logger.warning("[!] CORRUPTION DETECTED: Wiping portable environment for fresh start...")
+    try:
+        if PYTHON_ENV_DIR.exists():
+            shutil.rmtree(PYTHON_ENV_DIR, ignore_errors=True)
+        return True
+    except Exception as e:
+        logger.error(f"[ERROR] Wipe failed: {e}")
+        return False
+
+def install_portable_python():
+    """Downloads and sets up a standalone Python 3.10.11 environment."""
+    mirrors = [
+        "https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip",
+    ]
+    zip_tmp = APP_DIR / "python_tmp.zip"
+    
+    logger.info("\n" + "=" * 60)
+    logger.info("  PORTABLE SETUP: Initializing local Python 3.10 environment...")
+    logger.info("=" * 60)
+    
+    # Try each mirror with retries
+    downloaded = False
+    for i, url in enumerate(mirrors):
+        logger.info(f"[*] Trying download source {i+1}/{len(mirrors)}...")
+        for attempt in range(1, 4):  # 3 attempts per mirror
+            if attempt > 1:
+                wait_time = 2 ** attempt
+                logger.info(f"[*] Retry {attempt}/3 after {wait_time}s wait...")
+                time.sleep(wait_time)
+            
+            if download_file(url, zip_tmp):
+                downloaded = True
+                break
+            else:
+                # Clean up partial file
+                if zip_tmp.exists():
+                    try: os.remove(zip_tmp)
+                    except: pass
+        
+        if downloaded:
+            break
+    
+    if not downloaded:
+        logger.error("[ERROR] All download attempts failed.")
+        logger.error("[TIP] Check your internet connection and firewall settings.")
+        logger.error("[TIP] Ensure python.org is not blocked on your network.")
+        return False
+    
+    try:
+        # Validate the zip before extracting
+        import zipfile
+        logger.info("[*] Validating downloaded archive...")
+        try:
+            with zipfile.ZipFile(zip_tmp, 'r') as zf:
+                bad = zf.testzip()
+                if bad:
+                    raise zipfile.BadZipFile(f"Corrupt entry: {bad}")
+                logger.info(f"[OK] Valid archive ({len(zf.namelist())} files)")
+        except zipfile.BadZipFile as e:
+            logger.error(f"[ERROR] Downloaded file is corrupt: {e}")
+            if zip_tmp.exists(): os.remove(zip_tmp)
+            return False
+        
+        logger.info(f"[*] Extracting Python to {PYTHON_ENV_DIR}...")
+        PYTHON_ENV_DIR.mkdir(exist_ok=True)
+        with zipfile.ZipFile(zip_tmp, 'r') as zip_ref:
+            zip_ref.extractall(PYTHON_ENV_DIR)
+        
+        if zip_tmp.exists(): os.remove(zip_tmp)
+        
+        # Verify python.exe exists
+        if not LOCAL_PYTHON_EXE.exists():
+            logger.error(f"[ERROR] Extraction failed: {LOCAL_PYTHON_EXE} not found")
+            return False
+        
+        # Step 2: Bootstrap PIP
+        if bootstrap_pip():
+            if reconstruct_pth_file():
+                logger.info("[SUCCESS] Portable Python 3.10.11 is fully ready.")
+                global PYTHON_EXE
+                PYTHON_EXE = str(LOCAL_PYTHON_EXE)
+                return True
+    except Exception as e:
+        logger.error(f"[ERROR] Portable setup failed: {e}")
+    return False
+
+def verify_models():
+    """Checks if required YOLO models are present and attempts download if missing."""
+    logger.info("[*] Integrity check: AI Models...")
+    
+    # Model Map: File -> Download URL (Using official/verified mirrors)
+    # Note: These are placeholder URLs for custom models; main YOLO ones auto-download via Ultralytics
+    models_to_verify = {
+        "yolo11x.pt": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt",
+        "helmet_yolov8n.pt": None, # Custom model
+        "plate_yolov8n.pt": None,  # Custom model
+        "pose_landmarker_lite.task": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+    }
+    
+    models_path = APP_DIR / "models"
+    models_path.mkdir(exist_ok=True)
+    
+    missing_critical = []
+    for m, url in models_to_verify.items():
+        if not (models_path / m).exists():
+            if url:
+                logger.info(f"[!] Missing: {m}. Attempting automatic recovery...")
+                if not download_file(url, models_path / m):
+                    missing_critical.append(m)
+            else:
+                logger.warning(f"[!] Missing custom model: {m}. Please copy manually.")
+                missing_critical.append(m)
+    
+    if missing_critical:
+        # If we are missing custom models, we can't auto-fix them easily unless hosted
+        logger.warning(f"[!] Missing assets: {', '.join(missing_critical)}")
+        return False
+    
+    logger.info("[OK] All required AI models cataloged.")
+    return True
+
+def check_vc_runtime():
+    """Checks for the presence of the Microsoft VC++ 2015-2022 Redistributable."""
+    system32 = Path(os.environ.get('SYSTEMROOT', 'C:\\Windows')) / 'System32'
+    dlls = ['msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll']
+    missing = [dll for dll in dlls if not (system32 / dll).exists()]
+    if not missing:
+        return True
+    logger.warning(f"[!] Missing Microsoft VC++ Runtime components: {', '.join(missing)}")
+    return False
+
+def install_vc_runtime():
+    """Silently installs the Microsoft VC++ 2015-2022 Redistributable using winget."""
+    logger.info("[*] Attempting autonomous VC++ Redistributable installation...")
+    # winget install Microsoft.VCRedist.2015+.x64 --silent --accept-package-agreements --accept-source-agreements
+    rc, out, err = run_command([
+        "winget", "install", "Microsoft.VCRedist.2015+.x64", 
+        "--silent", "--accept-package-agreements", "--accept-source-agreements"
+    ], stream=True)
+    if rc == 0:
+        logger.info("[SUCCESS] VC++ Redistributable installed.")
+        return True
+    logger.error(f"[ERROR] VC++ installation failed: {err}")
+    return False
+
+# --- Self-Healing ---
+
+def repair_torch(cpu_only=True):
+    """Automatically repairs the AI engine if it's broken or incompatible."""
+    logger.info(f"[*] REPAIR INITIATED: Reinstalling PyTorch engine (CPU-Only: {cpu_only})...")
+    
+    # Check VC++ Runtime first, as it's the common cause of WinError 1114
+    if not check_vc_runtime():
+        install_vc_runtime()
+    
+    # 1. Uninstall broken versions and DEEP WIPE site-packages/torch
+    logger.info("[*] Removing existing PyTorch files and performing deep wipe...")
+    run_command([PYTHON_EXE, "-m", "pip", "uninstall", "torch", "torchvision", "torchaudio", "-y"])
+    
+    site_packages = Path(PYTHON_EXE).parent / "Lib" / "site-packages"
+    for folder in ["torch", "torchvision", "torchaudio"]:
+        target = site_packages / folder
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+            logger.info(f"    [CLEANED] {folder}")
+    
+    # 2. Reinstall correct version
+    if cpu_only:
+        logger.info("[*] Installing stable CPU version...")
+        rc, out, err = run_command([
+            PYTHON_EXE, "-m", "pip", "install", 
+            "torch", "torchvision", "torchaudio", 
+            "--index-url", "https://download.pytorch.org/whl/cpu"
+        ], stream=True)
+    else:
+        logger.info("[*] Installing GPU/CUDA optimized version...")
+        rc, out, err = run_command([
+            PYTHON_EXE, "-m", "pip", "install", 
+            "torch", "torchvision", "torchaudio"
+        ], stream=True)
+    
+    # Final check: Force DLL registration
+    reconstruct_pth_file()
+    
+    if rc == 0:
+        logger.info("[SUCCESS] AI Engine repaired.")
+        return True
+    else:
+        logger.error(f"[ERROR] Repair failed: {err}")
+        return False
+
+def trigger_python_310_install():
+    """Automatically installs Python 3.10 using winget if verified version is missing."""
+    logger.info("[*] Launching Automated Python 3.10 Installer (winget mode)...")
+    # We use winget directly for the most seamless experience
+    cmd = [
+        "winget", "install", "Python.Python.3.10", 
+        "--version", "3.10.11", "--silent", 
+        "--accept-package-agreements", "--accept-source-agreements"
+    ]
+    
+    rc, out, err = run_command(cmd, stream=True)
+    if rc == 0:
+        logger.info("[SUCCESS] Python 3.10.11 installed. Please restart the application.")
+        return True
+    else:
+        logger.error(f"[ERROR] Automated install failed (Code: {rc}).")
+        logger.error("Please run 'install_python_310.bat' manually as Administrator.")
+        return False
+
+def install_dependencies():
+    """Force-installs all required dependencies from requirements.txt."""
+    # Ensure PIP is available first
+    if not check_pip():
+        logger.info("[!] Attempting environment link repair (.pth)...")
+        reconstruct_pth_file()
+        if not check_pip():
+            logger.info("[!] PIP still missing. Attempting emergency bootstrap...")
+            if not bootstrap_pip():
+                logger.error("[FATAL] Could not bootstrap PIP. Trying force-wipe recovery...")
+                force_wipe_portable_env()
+                if install_portable_python():
+                    # Retry once after fresh install
+                    if check_pip(): return install_dependencies()
+                return False
+            # Re-verify after bootstrap
+            reconstruct_pth_file()
+            if not check_pip():
+                logger.error("[FATAL] PIP bootstrapping failed to link correctly.")
+                return False
+            
+    logger.info("[*] Syncing application dependencies... (this may take a minute)")
+    logger.info("[INFO] DETAILED INSTALL LOGS WILL BE SHOWN BELOW:")
+    logger.info("-" * 40)
+    rc, out, err = run_command([PYTHON_EXE, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)], stream=True)
+    logger.info("-" * 40)
+    if rc == 0:
+        logger.info("[OK] Dependencies synchronized.")
+        return True
+    else:
+        logger.error(f"[ERROR] Dependency synchronization failed: {err}")
+        # If it failed, try one last ditch effort: Reconstruct the .pth file and check pip
+        logger.info("[*] Attempting .pth reconstruction as a last-resort fix...")
+        reconstruct_pth_file()
+        return False
+
+# --- Start Sequence ---
+
+def launch_application():
+    """Launches the main window and monitors for environmental crashes."""
+    if not MAIN_SCRIPT.exists():
+        logger.critical(f"[FATAL] Entry point {MAIN_SCRIPT} not found. Reinstall the application.")
+        return
+
+    logger.info("[*] Handing control to Main Application...")
+    
+    # Create isolated environment 
+    env = os.environ.copy()
+    for var in ['PYTHONPATH', 'PYTHONHOME', 'PYTHONEXECUTABLE', 'PYTHONNOUSERSITE']:
+        env.pop(var, None)
+        
+    # We run in a managed subprocess so we can catch WinError 1114
+    try:
+        process = subprocess.Popen(
+            [PYTHON_EXE, str(MAIN_SCRIPT)],
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' and False else 0 
+        )
+        
+        # Monitor stderr for the famous DLL crash
+        while True:
+            line = process.stderr.readline()
+            if not line and process.poll() is not None:
+                break
+            
+            if line:
+                print(line.strip(), file=sys.stderr) # Keep printing to console
+                
+                # --- SELF-HEALING TRIGGERS ---
+                global REPAIR_ATTEMPTS
+                
+                # Check if we should even attempt repair (Protect against loops on incompatible Python)
+                major, minor = sys.version_info[:2]
+                can_repair = (major == 3 and 10 <= minor <= 12)
+                
+                if not can_repair and ("ModuleNotFoundError" in line or "No module named" in line or "AttributeError" in line):
+                    logger.error("[CRITICAL] Environment Incompatibility: Auto-repair disabled for Python 3.13+")
+                    logger.error("Please switch to Python 3.11 for a stable experience.")
+                    process.terminate()
+                    sys.exit(1)
+
+                # 1. Check for missing modules
+                if "ModuleNotFoundError" in line or "No module named" in line:
+                    if REPAIR_ATTEMPTS >= MAX_REPAIR_ATTEMPTS:
+                        logger.error("[FATAL] Multiple repair attempts failed. Stopping to prevent loop.")
+                        process.terminate()
+                        sys.exit(1)
+                        
+                    REPAIR_ATTEMPTS += 1
+                    logger.error(f"[SELF-HEAL] Detected missing dependency: {line.strip()}")
+                    process.terminate()
+                    logger.info(f"[*] Attempting to auto-install (Attempt {REPAIR_ATTEMPTS}/{MAX_REPAIR_ATTEMPTS})...")
+                    if install_dependencies():
+                        logger.info("[OK] Dependencies repaired. Restarting application...")
+                        time.sleep(2)
+                        return launch_application()
+                
+                # 2. Check for the specific PyTorch/CUDA crash (DLL load failure)
+                if "WinError 1114" in line or "c10.dll" in line or "AttributeError: module 'torch' has no attribute 'save'" in line:
+                    if REPAIR_ATTEMPTS >= MAX_REPAIR_ATTEMPTS:
+                        logger.error("[FATAL] AI Engine repair failed multiple times. Stopping.")
+                        process.terminate()
+                        sys.exit(1)
+                        
+                    REPAIR_ATTEMPTS += 1
+                    logger.error("[CRITICAL] Detected AI Engine crash (DLL load failure or broken Torch).")
+                    process.terminate()
+                    
+                    # Try to maintain GPU if it was found earlier
+                    has_gpu = os.environ.get("HAS_NVIDIA_GPU", "False") == "True"
+                    if repair_torch(cpu_only=not has_gpu):
+                        logger.info(f"[*] Self-heal successful (Attempt {REPAIR_ATTEMPTS}). Restarting...")
+                        return launch_application() # Re-launch
+                    else:
+                        logger.error("[FATAL] Auto-repair failed. Please contact engineering support.")
+                        sys.exit(1)
+                        
+        if process.poll() is not None and process.returncode != 0:
+            logger.warning(f"[*] Application closed with exit code {process.returncode}")
+            
+    except Exception as e:
+        logger.error(f"[ERROR] Launcher failed to start process: {e}")
+
+def main():
+    # Loop Protection
+    if IS_FROZEN and len(sys.argv) > 1:
+        if "-m" in sys.argv or str(MAIN_SCRIPT) in sys.argv:
+            print("[CRITICAL ERROR] Recursive launcher loop detected. Stopping.")
+            sys.exit(1)
+
+    log_header()
+    
+    # Check if we even found a Python interpreter
+    global PYTHON_EXE
+    PYTHON_EXE = get_python_path()
+    
+    if not PYTHON_EXE:
+        # If no Python found, try portable install first (User wanted auto-setup)
+        if install_portable_python():
+            logger.info("[OK] Continuing with local environment.")
+        elif trigger_python_310_install():
+            input("Install complete. Press Enter to exit and re-launch...")
+            sys.exit(0)
+        else:
+            sys.exit(1)
+
+    # Windows DLL path injection for portable environments
+    if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+        site_packages = Path(PYTHON_EXE).parent / "Lib" / "site-packages"
+        dll_paths = [Path(PYTHON_EXE).parent, site_packages / "torch" / "lib", site_packages / "cv2"]
+        for p in dll_paths:
+            if p.exists():
+                try: os.add_dll_directory(str(p))
+                except: pass
+    
+    # Check for GPU and export to env
+    has_gpu = False
+    try:
+        # Simple check for nvidia-smi
+        rc, out, err = run_command(["nvidia-smi"])
+        if rc == 0: has_gpu = True
+    except: pass
+    os.environ["HAS_NVIDIA_GPU"] = str(has_gpu)
+    
+    # Proactive VC++ Runtime check (Crucial for Zero-Drag)
+    if not check_vc_runtime():
+        install_vc_runtime()
+        
+    logger.info(f"[*] Targeting Verified Python: {PYTHON_EXE}")
+    
+    # Phase 0: Source Recovery (Standalone Bootstrapper)
+    if not MAIN_SCRIPT.exists():
+        if not recover_source_code():
+            logger.critical("[FATAL] Source recovery failed. Cannot continue.")
+            input("Press Enter to close...")
+            sys.exit(1)
+            
+    # Phase 1: Environment Integrity
+    if not check_python():
+        input("Press Enter to close...")
+        sys.exit(1)
+        
+    gpu_available = check_gpu()
+    
+    # Phase 2: Dependency Sync
+    install_dependencies()
+    
+    # Phase 3: Assets Check
+    verify_models()
+    
+    # Phase 4: Launch & Monitor
+    launch_application()
+    
+    logger.info("[*] System operations completed.")
+    # We only pause for input if there was a fatal error earlier, 
+    # but for a successful launch-and-close, we can exit cleanly.
+    # However, keeping a 2-second delay helps visibility.
+    time.sleep(2)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("[*] Bootstrap interrupted by user.")
+    except Exception as e:
+        logger.critical(f"[FATAL UNCAUGHT ERROR] {e}")
