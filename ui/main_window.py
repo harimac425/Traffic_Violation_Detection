@@ -1419,9 +1419,9 @@ class MainWindow(QMainWindow):
         if config.ENABLED_VIOLATIONS.get("NO_HELMET", True):
             for det in detections.get("helmets", []):
                 if det.class_name.lower() == "helmet":
-                    color = (0, 255, 0)  # Green for helmet
+                    color = (0, 255, 255)  # Yellow for helmet (BGR)
                 else:
-                    color = (0, 165, 255)  # Orange for no helmet
+                    color = (0, 0, 255)    # Red for no helmet (BGR)
                 label = f"{det.class_name}"
                 llm_v = getattr(det, "llm_verified", False)
                 frame = draw_detection(frame, det.box, label, color, llm_verified=llm_v)
