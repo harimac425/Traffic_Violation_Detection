@@ -233,8 +233,8 @@ class MultiModelDetector:
                         d.box = absolute_box
                         # Clean label for UI (Robust string matching)
                         c_name = d.class_name.lower().strip()
-                        is_helmet = ("helmet" in c_name and "without" not in c_name and "no" not in c_name)
-                        d.class_name = "Helmet" if is_helmet else "No Helmet"
+                        is_no_helmet = ("without" in c_name or "no" in c_name or "no_helmet" in c_name)
+                        d.class_name = "No Helmet" if is_no_helmet else "Helmet"
                         d.track_id = person.track_id # Associate with person's track ID
                         results["helmets"].append(d)
 
