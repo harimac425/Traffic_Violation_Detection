@@ -37,7 +37,6 @@ ConstraintAwareSORT Tracking
       ↓
 OCR Pipeline (PaddleOCR → EasyOCR → LLM fallback)
 + Phone Detection (MediaPipe Pose + YOLO)
-+ Red Signal Detection (HSV Color Segmentation)
       ↓
 Violation Logic Engine (6 violation types)
       ↓
@@ -50,16 +49,13 @@ Premium Glass Slate Dashboard (PyQt5)
 
 ---
 
-## 🚗 Detected Violations
+## 🚗 Detected Violations (Verified)
 
 | Violation | Method |
 |---|---|
 | 🪖 No Helmet | Head ROI extraction + YOLOv8n model |
 | 👥 Excess Riding (Triple) | Person-centric spatial association |
-| 🚨 Red Signal Jumping | HSV color segmentation + Stop-line gating |
 | 📱 Phone Usage | MediaPipe Pose + YOLO dual-lock |
-| ⚡ Over Speed | Pixel displacement / time delta |
-| 🔄 Wrong Way | Motion vector angle analysis |
 | 🪧 Missing Number Plate | Multi-frame persistence check |
 
 ---
@@ -89,10 +85,9 @@ Traffic_violation_Detection/
 │   ├── detector.py            # Multi-model YOLO detection engine
 │   ├── tracker.py             # ConstraintAwareSORT tracking
 │   ├── violations.py          # Violation logic (all 6 types)
-│   ├── ocr.py                 # PaddleOCR / EasyOCR / LLM cascade
+│   ├── ocr.py                 # License plate recognition engine
 │   ├── llm.py                 # Cognitive LLM Brain (Gemini / GPT-4o)
 │   ├── database.py            # SQLite violation storage
-│   ├── signal_detection.py    # Red signal + stop-line detection
 │   ├── phone_detection.py     # MediaPipe phone usage detection
 │   ├── report.py              # CSV / HTML export engine
 │   └── logger.py              # Session logging
