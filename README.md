@@ -38,7 +38,7 @@ ConstraintAwareSORT Tracking
 OCR Pipeline (PaddleOCR → EasyOCR → LLM fallback)
 + Phone Detection (MediaPipe Pose + YOLO)
       ↓
-Violation Logic Engine (6 violation types)
+Violation Logic Engine (4 verified types)
       ↓
 Cognitive LLM Brain (Gemini 2.0 / GPT-4o multi-frame voting)
       ↓
@@ -84,7 +84,7 @@ Traffic_violation_Detection/
 ├── src/
 │   ├── detector.py            # Multi-model YOLO detection engine
 │   ├── tracker.py             # ConstraintAwareSORT tracking
-│   ├── violations.py          # Violation logic (all 6 types)
+│   ├── violations.py          # Violation logic (Verified types)
 │   ├── ocr.py                 # License plate recognition engine
 │   ├── llm.py                 # Cognitive LLM Brain (Gemini / GPT-4o)
 │   ├── database.py            # SQLite violation storage
@@ -142,7 +142,6 @@ All parameters are in `config.py`. Key settings:
 | `SPEED_LIMIT_KMH` | `50` | Speed violation threshold |
 | `VIOLATION_PERSISTENCE_THRESHOLD` | `3` | Min consecutive frames to confirm |
 | `LLM_MAX_RPM` | `15` | LLM API rate limit |
-| `ENABLE_RED_SIGNAL` | `True` | Toggle red-signal detection |
 | `ENABLE_DYNAMIC_ROI` | `True` | Toggle dynamic ROI processing |
 
 ---
@@ -164,7 +163,7 @@ Get a free Gemini API key: [https://aistudio.google.com/apikey](https://aistudio
 - **Real-time violation log** with LLM reasoning
 - **Historical records browser** (SQLite-backed)
 - **One-click CSV/HTML export** for law enforcement records
-- **Stop-line & Signal ROI picker** — click directly on video to configure
+- **Dynamic ROI picker** — click directly on video to configure lanes
 
 ---
 
